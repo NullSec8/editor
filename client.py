@@ -12,6 +12,7 @@ class LiveShareClient:
 
         self.last_sent = ""
         self._job = None
+        self._recv_buffer = ""
 
         self.text.bind("<KeyRelease>", self.schedule_send)
 
@@ -20,17 +21,25 @@ class LiveShareClient:
 
     # ---------------- CONNECT ----------------
     def connect(self):
+        new_sock = None
         try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect(("127.0.0.1", 9999))
+            self._safe_close_socket()
+            new_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            new_sock.connect(("127.0.0.1", 9999))
+            self.sock = new_sock
+            self._recv_buffer = ""
             self.connected = True
 
             print("Connected to server")
 
-            threading.Thread(target=self.listen, daemon=True).start()
+            threading.Thread(target=self.listen, args=(new_sock,), daemon=True).start()
 
-        except:
+        except Exception:
             self.connected = False
+            if new_sock:
+                self._close_socket(new_sock)
+            if self.sock is new_sock:
+                self.sock = None
             print("Connection failed")
 
     # ---------------- AUTO RECONNECT (SAFE) ----------------
@@ -41,22 +50,35 @@ class LiveShareClient:
         self.text.after(2000, self.reconnect_loop)
 
     # ---------------- LISTEN ----------------
-    def listen(self):
+    def listen(self, listen_sock):
         while self.connected:
             try:
-                data = self.sock.recv(8192)
+                data = listen_sock.recv(8192)
                 if not data:
                     break
 
-                msg = json.loads(data.decode("utf-8"))
+                self._recv_buffer += data.decode("utf-8")
 
-                if msg["type"] == "sync":
-                    self.apply_text(msg["text"])
+                while "\n" in self._recv_buffer:
+                    line, self._recv_buffer = self._recv_buffer.split("\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
 
-            except:
+                    if msg.get("type") == "sync":
+                        # Tkinter UI updates must happen on the main thread.
+                        self.text.after(0, self.apply_text, msg.get("text", ""))
+
+            except Exception:
                 break
 
-        self.connected = False
+        if self.sock is listen_sock:
+            self.connected = False
+            self.sock = None
+        self._close_socket(listen_sock)
         print("Disconnected")
 
     # ---------------- DEBOUNCED SEND ----------------
@@ -68,6 +90,11 @@ class LiveShareClient:
 
     def send(self):
         if not self.connected:
+            return
+
+        sock = self.sock
+        if not sock:
+            self.connected = False
             return
 
         content = self.text.get("1.0", "end-1c")
@@ -83,10 +110,12 @@ class LiveShareClient:
                 "text": content
             }
 
-            self.sock.sendall(json.dumps(msg).encode("utf-8"))
+            sock.sendall((json.dumps(msg) + "\n").encode("utf-8"))
 
-        except:
-            self.connected = False
+        except Exception:
+            if self.sock is sock:
+                self.connected = False
+                self._safe_close_socket()
             print("Send failed (disconnect)")
 
     # ---------------- APPLY REMOTE TEXT ----------------
@@ -96,6 +125,18 @@ class LiveShareClient:
         if current != text:
             self.text.delete("1.0", "end")
             self.text.insert("1.0", text)
+
+    def _close_socket(self, sock):
+        if sock:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _safe_close_socket(self):
+        if self.sock:
+            self._close_socket(self.sock)
+            self.sock = None
 
 
 # ---------------- SIMPLE UI ----------------

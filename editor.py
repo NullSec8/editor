@@ -1,14 +1,23 @@
 import tkinter as tk
 from tkinter import filedialog, colorchooser, messagebox, ttk
-from ttkthemes import ThemedTk
 import json
 import socket
 import threading
 
 def start_liveshare_with_custom_server(editor_tab):
+    if editor_tab is None:
+        messagebox.showwarning("LiveShare", "No active tab to share.")
+        return
+
     def connect():
         server_host = host_entry.get()
-        server_port = int(port_entry.get())
+        try:
+            server_port = int(port_entry.get())
+            if server_port <= 0 or server_port > 65535:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("LiveShare", "Port must be a number between 1 and 65535.")
+            return
         connect_window.destroy()
         start_liveshare_client(editor_tab, server_host, server_port)
     
@@ -28,40 +37,90 @@ def start_liveshare_with_custom_server(editor_tab):
     connect_button = tk.Button(connect_window, text="Connect", command=connect)
     connect_button.grid(row=2, column=0, columnspan=2, pady=10)
 
+
+def stop_liveshare(editor_tab):
+    if not editor_tab:
+        return
+    if editor_tab.liveshare_handler_id is not None:
+        try:
+            editor_tab.text_area.unbind("<KeyRelease>", editor_tab.liveshare_handler_id)
+        except Exception:
+            pass
+        editor_tab.liveshare_handler_id = None
+    if editor_tab.liveshare_sock:
+        try:
+            editor_tab.liveshare_sock.close()
+        except OSError:
+            pass
+    editor_tab.liveshare_sock = None
+    editor_tab.liveshare_active = False
+
+
 def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999):
+    stop_liveshare(editor_tab)
+
     def receive_updates(sock):
+        recv_buffer = ""
         while True:
             try:
-                data = sock.recv(4096).decode('utf-8')
-                if data:
-                    # Zëvendëson përmbajtjen vetëm nëse është ndryshe
-                    current_text = editor_tab.text_area.get("1.0", tk.END).strip()
-                    if data.strip() != current_text:
-                        editor_tab.text_area.delete("1.0", tk.END)
-                        editor_tab.text_area.insert(tk.END, data)
+                data = sock.recv(4096)
+                if not data:
+                    break
+                recv_buffer += data.decode('utf-8')
+
+                while "\n" in recv_buffer:
+                    line, recv_buffer = recv_buffer.split("\n", 1)
+                    if not line.strip():
+                        continue
+                    try:
+                        message = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if message.get("type") != "sync":
+                        continue
+                    remote_text = message.get("text", "")
+                    root.after(0, apply_remote_text, remote_text)
             except Exception as e:
                 print(f"Gabim në lidhje: {e}")
                 break
+        stop_liveshare(editor_tab)
+
+    def apply_remote_text(remote_text):
+        current_text = editor_tab.text_area.get("1.0", "end-1c")
+        if remote_text != current_text:
+            editor_tab.text_area.delete("1.0", tk.END)
+            editor_tab.text_area.insert("1.0", remote_text)
 
     def on_key_release(event=None):
+        if not editor_tab.liveshare_sock:
+            return
         try:
-            text = editor_tab.text_area.get("1.0", tk.END)
-            sock.sendall(text.encode('utf-8'))
+            text = editor_tab.text_area.get("1.0", "end-1c")
+            payload = json.dumps({"type": "sync", "text": text}) + "\n"
+            editor_tab.liveshare_sock.sendall(payload.encode('utf-8'))
         except Exception as e:
             print(f"Gabim në dërgim: {e}")
+            stop_liveshare(editor_tab)
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(5)  # Timeout prej 5 sekondash
         sock.connect((server_host, server_port))
+        sock.settimeout(None)
+        editor_tab.liveshare_sock = sock
+        editor_tab.liveshare_active = True
         threading.Thread(target=receive_updates, args=(sock,), daemon=True).start()
-        editor_tab.text_area.bind("<KeyRelease>", on_key_release)
+        # add="+" keeps existing key handlers (line numbers, modified flag, etc.)
+        editor_tab.liveshare_handler_id = editor_tab.text_area.bind("<KeyRelease>", on_key_release, add="+")
         messagebox.showinfo("LiveShare", f"U lidh me serverin {server_host}:{server_port}")
     except socket.timeout:
+        stop_liveshare(editor_tab)
         messagebox.showerror("LiveShare", f"Timeout - Serveri nuk u gjet në {server_host}:{server_port}")
     except ConnectionRefusedError:
+        stop_liveshare(editor_tab)
         messagebox.showerror("LiveShare", f"Lidhja u refuzua - Sigurohuni që serveri është duke xhiruar në {server_host}:{server_port}")
     except Exception as e:
+        stop_liveshare(editor_tab)
         messagebox.showerror("LiveShare", f"Nuk u lidh: {e}")
 
 # Funksioni Per Autosave
@@ -121,6 +180,7 @@ class EditorTab:
         self.modified = False  # Nese ka ndryshime te paruajtura
         self.liveshare_sock = None
         self.liveshare_active = False
+        self.liveshare_handler_id = None
         
         # Krijojme Frame per te mbajtur canvas dhe scrollbar
         editor_frame = tk.Frame(self.frame)
@@ -220,10 +280,13 @@ notebook.pack(fill=tk.BOTH, expand=True)
 
 # Dictionary per te mbajtur te dhenat e tabave
 tabs = {}
+next_tab_id = 1
 
 # Funksioni per te krijuar nje tab te ri
 def create_new_tab(title="New File"):
-    tab_id = len(tabs) + 1
+    global next_tab_id
+    tab_id = next_tab_id
+    next_tab_id += 1
     editor_tab = EditorTab(notebook, text_color, bg_color, current_font_size)
     tabs[tab_id] = editor_tab
     notebook.add(editor_tab.frame, text=title)
@@ -232,9 +295,10 @@ def create_new_tab(title="New File"):
 
 # Funksioni per te marre tabin aktual
 def get_current_tab():
-    current_tab_id = notebook.index(notebook.select())
-    if current_tab_id >= 0:
-        return list(tabs.values())[current_tab_id]
+    selected_tab = notebook.select()
+    for editor_tab in tabs.values():
+        if str(editor_tab.frame) == selected_tab:
+            return editor_tab
     return None
 
 # Funksioni per te hapur nje skedar
@@ -438,13 +502,8 @@ def close_tab(event=None):
         return
     
     # Nëse ka lidhje liveshare, mbylle atë
-    if hasattr(current_tab, 'liveshare_sock') and current_tab.liveshare_sock:
-        try:
-            current_tab.liveshare_sock.close()
-        except Exception as e:
-            print(f"Gabim gjatë mbylljes së liveshare socket: {e}")
+    stop_liveshare(current_tab)
 
-    # Mbyll tab-in normalisht (kjo pjesë mund të jetë edhe më poshtë në funksionin origjinal)
     if current_tab.modified:
         result = messagebox.askyesnocancel(
             "Save Changes", 
@@ -459,28 +518,10 @@ def close_tab(event=None):
     notebook.forget(tab_index)
     
     # Largo nga dictionary
-    tab_id = list(tabs.keys())[tab_index]
-    del tabs[tab_id]
-
-
-    # Kontrollo nese ka ndryshime te paruajtura
-    if current_tab.modified:
-        result = messagebox.askyesnocancel(
-            "Save Changes", 
-            "Do you want to save changes before closing?"
-        )
-        if result is None:  # Cancel
-            return
-        if result:  # Yes
-            ruaj_skedar()
-    
-    # Gjej indeksin e tabit dhe fshije
-    tab_index = notebook.index(notebook.select())
-    notebook.forget(tab_index)
-    
-    # Largo nga dictionary
-    tab_id = list(tabs.keys())[tab_index]
-    del tabs[tab_id]
+    for tab_id, editor_tab in list(tabs.items()):
+        if editor_tab is current_tab:
+            del tabs[tab_id]
+            break
 
 # Shto support per Undo/Redo
 def undo(event=None):
