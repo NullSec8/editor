@@ -4,6 +4,10 @@ import json
 import socket
 import threading
 
+def resolve_ui_bg(color):
+    return "#1e1e1e" if color in ("black", "#000000") else color
+
+
 def start_liveshare_with_custom_server(editor_tab):
     if editor_tab is None:
         messagebox.showwarning("LiveShare", "No active tab to share.")
@@ -23,18 +27,28 @@ def start_liveshare_with_custom_server(editor_tab):
     
     connect_window = tk.Toplevel(root)
     connect_window.title("Connect to LiveShare Server")
+    ui_bg = resolve_ui_bg(bg_color)
+    connect_window.configure(bg=ui_bg)
     
-    tk.Label(connect_window, text="Server Host:").grid(row=0, column=0, padx=5, pady=5)
-    host_entry = tk.Entry(connect_window)
+    tk.Label(connect_window, text="Server Host:", bg=ui_bg, fg=text_color).grid(row=0, column=0, padx=5, pady=5)
+    host_entry = tk.Entry(connect_window, bg=ui_bg, fg=text_color, insertbackground=text_color)
     host_entry.insert(0, "localhost")
     host_entry.grid(row=0, column=1, padx=5, pady=5)
     
-    tk.Label(connect_window, text="Server Port:").grid(row=1, column=0, padx=5, pady=5)
-    port_entry = tk.Entry(connect_window)
+    tk.Label(connect_window, text="Server Port:", bg=ui_bg, fg=text_color).grid(row=1, column=0, padx=5, pady=5)
+    port_entry = tk.Entry(connect_window, bg=ui_bg, fg=text_color, insertbackground=text_color)
     port_entry.insert(0, "9999")
     port_entry.grid(row=1, column=1, padx=5, pady=5)
     
-    connect_button = tk.Button(connect_window, text="Connect", command=connect)
+    connect_button = tk.Button(
+        connect_window,
+        text="Connect",
+        command=connect,
+        bg="#2a2a2a",
+        fg=text_color,
+        activebackground="#3a3a3a",
+        activeforeground=text_color,
+    )
     connect_button.grid(row=2, column=0, columnspan=2, pady=10)
 
 
@@ -54,6 +68,11 @@ def stop_liveshare(editor_tab):
             pass
     editor_tab.liveshare_sock = None
     editor_tab.liveshare_active = False
+
+
+def _schedule_stop_liveshare(editor_tab):
+    # Ensure Tkinter state/bindings are changed on the UI thread.
+    root.after(0, stop_liveshare, editor_tab)
 
 
 def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999):
@@ -83,7 +102,9 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
             except Exception as e:
                 print(f"Gabim në lidhje: {e}")
                 break
-        stop_liveshare(editor_tab)
+        # Avoid tearing down a newer connection if reconnection happened.
+        if editor_tab.liveshare_sock is sock:
+            _schedule_stop_liveshare(editor_tab)
 
     def apply_remote_text(remote_text):
         current_text = editor_tab.text_area.get("1.0", "end-1c")
@@ -112,6 +133,8 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
         threading.Thread(target=receive_updates, args=(sock,), daemon=True).start()
         # add="+" keeps existing key handlers (line numbers, modified flag, etc.)
         editor_tab.liveshare_handler_id = editor_tab.text_area.bind("<KeyRelease>", on_key_release, add="+")
+        # Push current document immediately so collaborators sync without waiting for next keystroke.
+        on_key_release()
         messagebox.showinfo("LiveShare", f"U lidh me serverin {server_host}:{server_port}")
     except socket.timeout:
         stop_liveshare(editor_tab)
@@ -159,6 +182,32 @@ def load_colors():
     except (FileNotFoundError, json.JSONDecodeError):
         return 'green', 'black', 12  # Ngjyrat dhe madhesia default
 
+
+def apply_ui_theme():
+    ui_bg = resolve_ui_bg(bg_color)
+    root.configure(bg=bg_color)
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure(".", background=ui_bg, foreground=text_color)
+    style.configure("TFrame", background=ui_bg)
+    style.configure("TLabel", background=ui_bg, foreground=text_color)
+    style.configure("TNotebook", background=ui_bg, borderwidth=0)
+    style.configure("TNotebook.Tab", background=ui_bg, foreground=text_color, padding=(10, 4))
+    style.configure("TEntry", fieldbackground=ui_bg, foreground=text_color)
+    style.configure("TButton", background="#2a2a2a", foreground=text_color)
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", "#2a2a2a"), ("active", "#1f1f1f")],
+        foreground=[("selected", text_color), ("active", text_color)],
+    )
+    style.map("TButton", background=[("active", "#3a3a3a")], foreground=[("active", text_color)])
+
+
 # Funksioni per te ruajtur konfigurimin e ngjyrave ne nje skedar
 def save_colors(text_color, bg_color, font_size):
     settings = {
@@ -183,7 +232,7 @@ class EditorTab:
         self.liveshare_handler_id = None
         
         # Krijojme Frame per te mbajtur canvas dhe scrollbar
-        editor_frame = tk.Frame(self.frame)
+        editor_frame = tk.Frame(self.frame, bg=bg_color)
         editor_frame.pack(fill=tk.BOTH, expand=True)
         
         # Canvas per numrat e linjave
@@ -212,8 +261,12 @@ class EditorTab:
         
         # Scrollbar
         self.scrollbar = tk.Scrollbar(
-            editor_frame, 
-            command=self.on_scroll
+            editor_frame,
+            command=self.on_scroll,
+            bg="#2a2a2a",
+            activebackground="#3a3a3a",
+            troughcolor=bg_color,
+            highlightthickness=0,
         )
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         
@@ -273,10 +326,27 @@ text_color, bg_color, current_font_size = load_colors()
 
 # Ndrysho fontin dhe ngjyrat per te krijuar atmosferen e nje terminali
 root.config(bg=bg_color)
+option_bg = "#1e1e1e" if bg_color in ("black", "#000000") else bg_color
+root.option_add("*Background", option_bg)
+root.option_add("*Foreground", text_color)
+root.option_add("*Entry.Background", option_bg)
+root.option_add("*Entry.Foreground", text_color)
+root.option_add("*Entry.InsertBackground", text_color)
+root.option_add("*Text.Background", option_bg)
+root.option_add("*Text.Foreground", text_color)
+root.option_add("*Text.InsertBackground", text_color)
+root.option_add("*Menu.Background", option_bg)
+root.option_add("*Menu.Foreground", text_color)
+root.option_add("*Menu.ActiveBackground", "#2a2a2a")
+root.option_add("*Menu.ActiveForeground", text_color)
+root.option_add("*Button.Background", "#2a2a2a")
+root.option_add("*Button.Foreground", text_color)
+root.option_add("*Toplevel.Background", option_bg)
 
 # Notebook per tabs
 notebook = ttk.Notebook(root)
 notebook.pack(fill=tk.BOTH, expand=True)
+apply_ui_theme()
 
 # Dictionary per te mbajtur te dhenat e tabave
 tabs = {}
@@ -394,6 +464,7 @@ def ndrysho_ngjyren_tekstit(event=None):
         # Ruaj ne cilesimet globale
         global text_color
         text_color = ngjyra
+        apply_ui_theme()
         save_colors(text_color, bg_color, current_font_size)
 
 # Funksioni per te ndryshuar ngjyren e fonit
@@ -411,6 +482,7 @@ def ndrysho_ngjyren_fonit(event=None):
         # Ruaj ne cilesimet globale
         global bg_color
         bg_color = ngjyra
+        apply_ui_theme()
         save_colors(text_color, bg_color, current_font_size)
 
 # Funksioni per te hapur dritaren e ndihmes
@@ -442,9 +514,10 @@ def find_text(event=None):
     find_window.title("Find Text")
     find_window.transient(root)
     find_window.resizable(False, False)
+    find_window.configure(bg=resolve_ui_bg(bg_color))
     
-    tk.Label(find_window, text="Find:").grid(row=0, column=0, padx=10, pady=5, sticky='e')
-    search_entry = tk.Entry(find_window, width=40)
+    tk.Label(find_window, text="Find:", bg=resolve_ui_bg(bg_color), fg=text_color).grid(row=0, column=0, padx=10, pady=5, sticky='e')
+    search_entry = tk.Entry(find_window, width=40, bg=resolve_ui_bg(bg_color), fg=text_color, insertbackground=text_color)
     search_entry.grid(row=0, column=1, padx=10, pady=5)
     search_entry.focus_set()
     
@@ -462,7 +535,15 @@ def find_text(event=None):
             else:
                 messagebox.showinfo("Info", "Text not found.")
     
-    tk.Button(find_window, text="Find", command=search).grid(row=1, column=0, columnspan=2, pady=5)
+    tk.Button(
+        find_window,
+        text="Find",
+        command=search,
+        bg="#2a2a2a",
+        fg=text_color,
+        activebackground="#3a3a3a",
+        activeforeground=text_color,
+    ).grid(row=1, column=0, columnspan=2, pady=5)
 
 # Funksioni per zmadhimin e tekstit (zoom in)
 def zoom_in(event=None):
@@ -541,11 +622,11 @@ def redo(event=None):
             pass
 
 # Krijo nje menu
-menu = tk.Menu(root)
+menu = tk.Menu(root, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 root.config(menu=menu)
 
 # Shto opsionet e menu-se
-file_menu = tk.Menu(menu, tearoff=0)
+file_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="File", menu=file_menu)
 file_menu.add_command(label="New", command=new_file, accelerator="Ctrl+N")
 file_menu.add_command(label="Open", command=hap_skedar, accelerator="Ctrl+O")
@@ -559,7 +640,7 @@ file_menu.add_separator()
 file_menu.add_command(label="Start LiveShare", command=lambda: start_liveshare_with_custom_server(get_current_tab()))
 
 # Shto opsione per ngjyra
-edit_menu = tk.Menu(menu, tearoff=0)
+edit_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Edit", menu=edit_menu)
 edit_menu.add_command(label="Change Text Color", command=ndrysho_ngjyren_tekstit, accelerator="Ctrl+T")
 edit_menu.add_command(label="Change Background Color", command=ndrysho_ngjyren_fonit, accelerator="Ctrl+B")
@@ -570,13 +651,13 @@ edit_menu.add_separator()
 edit_menu.add_command(label="Find", command=find_text, accelerator="Ctrl+F")
 
 # Shto opsione per zoom
-view_menu = tk.Menu(menu, tearoff=0)
+view_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="View", menu=view_menu)
 view_menu.add_command(label="Zoom In", command=zoom_in, accelerator="Ctrl++")
 view_menu.add_command(label="Zoom Out", command=zoom_out, accelerator="Ctrl+-")
 
 # Shto opsionin Help
-help_menu = tk.Menu(menu, tearoff=0)
+help_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Help", menu=help_menu)
 help_menu.add_command(label="Help", command=shfaq_help)
 
@@ -585,6 +666,7 @@ root.bind("<Control-n>", new_file)  # Ctrl+N per skedar te ri
 root.bind("<Control-o>", hap_skedar)  # Ctrl+O per te hapur nje skedar
 root.bind("<Control-s>", ruaj_skedar)  # Ctrl+S per te ruajtur nje skedar
 root.bind("<Control-Shift-S>", ruaj_si_skedar)  # Ctrl+Shift+S per Save As
+root.bind("<Control-Shift-s>", ruaj_si_skedar)  # Alt binding for some layouts/window managers
 root.bind("<Control-w>", close_tab)  # Ctrl+W per te mbyllur tabin
 root.bind("<Control-t>", ndrysho_ngjyren_tekstit)  # Ctrl+T per te ndryshuar ngjyren e tekstit
 root.bind("<Control-b>", ndrysho_ngjyren_fonit)  # Ctrl+B per te ndryshuar ngjyren e fonit
