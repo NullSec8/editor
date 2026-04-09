@@ -3,28 +3,36 @@ import threading
 import json
 
 clients = set()
+clients_lock = threading.Lock()
+
+
+def _remove_client(conn):
+    with clients_lock:
+        clients.discard(conn)
+    try:
+        conn.close()
+    except OSError:
+        pass
+
 
 def broadcast(msg, sender=None):
-    dead = set()
+    payload = (json.dumps(msg) + "\n").encode("utf-8")
 
-    for c in clients:
-        if c == sender:
-            continue
-        try:
-            c.sendall(json.dumps(msg).encode("utf-8"))
-        except:
-            dead.add(c)
+    with clients_lock:
+        recipients = [c for c in clients if c != sender]
 
-    for d in dead:
-        clients.discard(d)
+    for c in recipients:
         try:
-            d.close()
-        except:
-            pass
+            c.sendall(payload)
+        except OSError:
+            _remove_client(c)
+
 
 def handle_client(conn):
-    clients.add(conn)
+    with clients_lock:
+        clients.add(conn)
     print("Client connected:", conn.getpeername())
+    recv_buffer = ""
 
     while True:
         try:
@@ -32,18 +40,22 @@ def handle_client(conn):
             if not data:
                 break
 
-            msg = json.loads(data.decode("utf-8"))
-            broadcast(msg, conn)
+            recv_buffer += data.decode("utf-8")
 
-        except:
+            while "\n" in recv_buffer:
+                line, recv_buffer = recv_buffer.split("\n", 1)
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                broadcast(msg, conn)
+
+        except OSError:
             break
 
-    clients.discard(conn)
-    try:
-        conn.close()
-    except:
-        pass
-
+    _remove_client(conn)
     print("Client disconnected")
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
