@@ -13,10 +13,13 @@ SETTINGS_FILE = "settings.json"
 APP_START_TIME = time.time()
 DEFAULT_TEXT_COLOR = "#d7dde7"
 DEFAULT_BG_COLOR = "#121417"
+UI_BG = "#111318"
 UI_PANEL_BG = "#171a1f"
 UI_ELEVATED_BG = "#1d2330"
 UI_BORDER_COLOR = "#2a3242"
 UI_MUTED_TEXT = "#9aa4b2"
+DEFAULT_SHOW_SIDEBAR = False
+DEFAULT_SHOW_LINE_NUMBERS = False
 
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
@@ -110,12 +113,12 @@ def update_status_bar(event=None):
     insert_idx = editor_tab.text_area.index("insert")
     line, col = insert_idx.split(".")
     path = short_display_path(editor_tab.file_path)
-    room = editor_tab.liveshare_room if editor_tab.liveshare_active else "-"
-    modified = "modified" if editor_tab.modified else "saved"
-    wrap = "wrap" if word_wrap_enabled else "nowrap"
+    modified_mark = "*" if editor_tab.modified else ""
     elapsed = format_elapsed(time.time() - APP_START_TIME)
-    collaboration = f"room:{room}" if editor_tab.liveshare_active else "solo"
-    status_var.set(f"{path}  |  {line}:{int(col) + 1}  |  {modified}  |  {wrap}  |  {collaboration}  |  wasted: {elapsed}")
+    parts = [path, f"{line}:{int(col) + 1}{modified_mark}", elapsed]
+    if editor_tab.liveshare_active and editor_tab.liveshare_room:
+        parts.append(f"live:{editor_tab.liveshare_room}")
+    status_var.set("  ".join(parts))
 
 
 def refresh_tab_title(editor_tab):
@@ -134,10 +137,16 @@ def apply_text_area_theme(editor_tab):
         bg=bg_color,
         fg=text_color,
         insertbackground=text_color,
-        font=editor_font,
+        font=("Consolas", current_font_size),
         wrap=tk.WORD if word_wrap_enabled else tk.NONE,
     )
-    editor_tab.line_numbers_canvas.config(bg=UI_PANEL_BG)
+    if line_numbers_enabled:
+        editor_tab.line_numbers_canvas.config(bg=UI_PANEL_BG, width=46)
+        if not editor_tab.line_numbers_canvas.winfo_ismapped():
+            editor_tab.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y, before=editor_tab.text_area)
+    else:
+        if editor_tab.line_numbers_canvas.winfo_ismapped():
+            editor_tab.line_numbers_canvas.pack_forget()
     editor_tab.scrollbar.config(bg=UI_PANEL_BG, activebackground=UI_ELEVATED_BG, troughcolor=UI_PANEL_BG)
     editor_tab.update_line_numbers()
 
@@ -458,19 +467,15 @@ def apply_ui_theme():
     style.configure(".", background=ui_bg, foreground=text_color)
     style.configure("TFrame", background=ui_bg)
     style.configure("TLabel", background=ui_bg, foreground=UI_MUTED_TEXT)
-    style.configure("TNotebook", background=ui_bg, borderwidth=0, tabmargins=(6, 6, 6, 0))
+    style.configure("TNotebook", background=ui_bg, borderwidth=0, tabmargins=(2, 2, 2, 0))
     style.configure(
         "TNotebook.Tab",
         background=UI_PANEL_BG,
         foreground=UI_MUTED_TEXT,
         borderwidth=0,
-        padding=(12, 6),
+        padding=(10, 4),
     )
-    style.map(
-        "TNotebook.Tab",
-        background=[("selected", UI_ELEVATED_BG), ("active", UI_ELEVATED_BG)],
-        foreground=[("selected", text_color), ("active", text_color)],
-    )
+    style.map("TNotebook.Tab", background=[("selected", UI_ELEVATED_BG)], foreground=[("selected", text_color)])
     style.configure(
         "TEntry",
         fieldbackground=UI_ELEVATED_BG,
@@ -480,10 +485,10 @@ def apply_ui_theme():
         relief="flat",
     )
     style.configure("TButton", background=UI_ELEVATED_BG, foreground=text_color, borderwidth=0, relief="flat")
-    style.map("TButton", background=[("active", "#263042"), ("pressed", "#202a3a")], foreground=[("active", text_color)])
-    style.configure("Treeview", background=UI_PANEL_BG, foreground=text_color, fieldbackground=UI_PANEL_BG, rowheight=22, borderwidth=0)
+    style.map("TButton", background=[("active", UI_ELEVATED_BG), ("pressed", UI_ELEVATED_BG)], foreground=[("active", text_color)])
+    style.configure("Treeview", background=UI_PANEL_BG, foreground=text_color, fieldbackground=UI_PANEL_BG, rowheight=20, borderwidth=0)
     style.configure("Treeview.Heading", background=UI_ELEVATED_BG, foreground=UI_MUTED_TEXT, relief="flat", borderwidth=0)
-    style.map("Treeview", background=[("selected", "#263042")], foreground=[("selected", text_color)])
+    style.map("Treeview", background=[("selected", UI_ELEVATED_BG)], foreground=[("selected", text_color)])
     root.option_add("*Menu.Background", UI_PANEL_BG)
     root.option_add("*Menu.Foreground", text_color)
     root.option_add("*Menu.ActiveBackground", UI_ELEVATED_BG)
@@ -558,8 +563,8 @@ class EditorTab:
         editor_frame = tk.Frame(self.frame, bg=UI_BG)
         editor_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.line_numbers_canvas = tk.Canvas(editor_frame, width=50, bg=UI_PANEL_BG, bd=0, highlightthickness=0)
-        self.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y)
+        self.line_numbers_canvas = tk.Canvas(editor_frame, width=44, bg=UI_BG, bd=0, highlightthickness=0)
+        self.line_numbers_canvas.pack_forget()
 
         self.text_area = tk.Text(
             editor_frame,
@@ -774,9 +779,9 @@ root.option_add("*Text.Foreground", text_color)
 root.option_add("*Text.InsertBackground", text_color)
 root.option_add("*Menu.Background", option_bg)
 root.option_add("*Menu.Foreground", text_color)
-root.option_add("*Menu.ActiveBackground", "#2a2a2a")
+root.option_add("*Menu.ActiveBackground", UI_ELEVATED_BG)
 root.option_add("*Menu.ActiveForeground", text_color)
-root.option_add("*Button.Background", "#2a2a2a")
+root.option_add("*Button.Background", UI_ELEVATED_BG)
 root.option_add("*Button.Foreground", text_color)
 root.option_add("*Toplevel.Background", option_bg)
 
@@ -790,16 +795,18 @@ tabs = {}
 next_tab_id = 1
 open_recent_menu = None
 wrap_var = tk.BooleanVar(value=word_wrap_enabled)
+line_numbers_enabled = DEFAULT_SHOW_LINE_NUMBERS
+sidebar_visible = DEFAULT_SHOW_SIDEBAR
 ui_font = ("Segoe UI", 10)
-code_font = ("JetBrains Mono", current_font_size)
 
-main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=UI_BG, sashwidth=4, sashrelief=tk.FLAT)
+main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=UI_BG, sashwidth=3, sashrelief=tk.FLAT)
 main_pane.pack(fill=tk.BOTH, expand=True)
 
-left_sidebar = tk.Frame(main_pane, bg=UI_PANEL_BG, width=240, padx=10, pady=10)
-main_pane.add(left_sidebar, minsize=180)
+left_sidebar = tk.Frame(main_pane, bg=UI_PANEL_BG, width=220, padx=8, pady=8)
+if DEFAULT_SHOW_SIDEBAR:
+    main_pane.add(left_sidebar, minsize=150)
 
-right_panel = tk.Frame(main_pane, bg=UI_BG, padx=8, pady=8)
+right_panel = tk.Frame(main_pane, bg=UI_BG, padx=4, pady=4)
 main_pane.add(right_panel, stretch="always")
 
 project_header = tk.Label(
@@ -1116,6 +1123,27 @@ def toggle_word_wrap(event=None):
     save_settings()
 
 
+def toggle_sidebar(event=None):
+    global sidebar_visible
+    if sidebar_visible:
+        main_pane.forget(left_sidebar)
+        sidebar_visible = False
+    else:
+        main_pane.add(left_sidebar, before=right_panel, minsize=150)
+        sidebar_visible = True
+    update_status_bar()
+    return "break"
+
+
+def toggle_line_numbers(event=None):
+    global line_numbers_enabled
+    line_numbers_enabled = not line_numbers_enabled
+    for tab in tabs.values():
+        apply_text_area_theme(tab)
+    update_status_bar()
+    return "break"
+
+
 def disconnect_liveshare(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
@@ -1390,6 +1418,8 @@ menu.add_cascade(label="View", menu=view_menu)
 view_menu.add_command(label="Zoom In", command=zoom_in, accelerator="Ctrl++")
 view_menu.add_command(label="Zoom Out", command=zoom_out, accelerator="Ctrl+-")
 view_menu.add_checkbutton(label="Word Wrap", variable=wrap_var, command=toggle_word_wrap, accelerator="Ctrl+Shift+W")
+view_menu.add_command(label="Toggle Sidebar", command=toggle_sidebar, accelerator="Ctrl+\\")
+view_menu.add_command(label="Toggle Line Numbers", command=toggle_line_numbers, accelerator="Ctrl+Shift+N")
 
 help_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Help", menu=help_menu)
@@ -1417,6 +1447,9 @@ root.bind("<Control-Shift-w>", lambda e: (wrap_var.set(not wrap_var.get()), togg
 root.bind("<Control-q>", on_app_exit)
 root.bind("<Control-plus>", zoom_in)
 root.bind("<Control-minus>", zoom_out)
+root.bind("<Control-backslash>", toggle_sidebar)
+root.bind("<Control-Shift-N>", toggle_line_numbers)
+root.bind("<Control-Shift-n>", toggle_line_numbers)
 root.bind("<Control-z>", undo)
 root.bind("<Control-y>", redo)
 notebook.bind("<<NotebookTabChanged>>", update_status_bar)
