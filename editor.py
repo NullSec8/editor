@@ -1,8 +1,134 @@
-import tkinter as tk
-from tkinter import filedialog, colorchooser, messagebox, ttk
 import json
+import os
 import socket
 import threading
+import tkinter as tk
+from tkinter import colorchooser, filedialog, messagebox, ttk
+
+
+def resolve_ui_bg(color):
+    return "#1e1e1e" if color in ("black", "#000000") else color
+
+
+def file_name_from_path(path):
+    return os.path.basename(path) if path else "New File"
+
+
+def safe_tab_title(editor_tab):
+    title = file_name_from_path(editor_tab.file_path)
+    if editor_tab.modified:
+        return f"{title}*"
+    return title
+
+
+def update_status_bar(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        status_var.set("No tab selected")
+        return
+
+    insert_idx = editor_tab.text_area.index("insert")
+    line, col = insert_idx.split(".")
+    path = editor_tab.file_path or "Untitled"
+    room = editor_tab.liveshare_room if editor_tab.liveshare_active else "-"
+    modified = "modified" if editor_tab.modified else "saved"
+    status_var.set(f"{path} | Ln {line}, Col {int(col) + 1} | {modified} | room: {room}")
+
+
+def refresh_tab_title(editor_tab):
+    try:
+        idx = notebook.index(editor_tab.frame)
+    except tk.TclError:
+        return
+    notebook.tab(idx, text=safe_tab_title(editor_tab))
+    update_status_bar()
+
+
+def apply_text_area_theme(editor_tab):
+    editor_tab.text_area.config(
+        bg=bg_color,
+        fg=text_color,
+        insertbackground=text_color,
+        font=("Courier New", current_font_size),
+    )
+    editor_tab.line_numbers_canvas.config(bg=bg_color)
+    editor_tab.scrollbar.config(troughcolor=bg_color)
+    editor_tab.update_line_numbers()
+
+
+def populate_tree_node(parent_item, abs_dir):
+    try:
+        entries = sorted(os.listdir(abs_dir), key=lambda name: (not os.path.isdir(os.path.join(abs_dir, name)), name.lower()))
+    except OSError:
+        return
+
+    for name in entries:
+        full_path = os.path.join(abs_dir, name)
+        item = file_tree.insert(parent_item, "end", text=name, open=False, values=(full_path,))
+        if os.path.isdir(full_path):
+            file_tree.insert(item, "end", text="__dummy__")
+
+
+def on_tree_open(event=None):
+    selected = file_tree.focus()
+    if not selected:
+        return
+    values = file_tree.item(selected, "values")
+    if not values:
+        return
+    path = values[0]
+    if not os.path.isdir(path):
+        return
+
+    children = file_tree.get_children(selected)
+    if len(children) == 1 and file_tree.item(children[0], "text") == "__dummy__":
+        file_tree.delete(children[0])
+        populate_tree_node(selected, path)
+
+
+def open_file_in_new_tab(file_path):
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+    except Exception as e:
+        messagebox.showerror("Error", f"Gabim gjate hapjes se skedarit: {e}")
+        return None
+
+    editor_tab = create_new_tab(file_name_from_path(file_path))
+    editor_tab.text_area.delete("1.0", tk.END)
+    editor_tab.text_area.insert("1.0", content)
+    editor_tab.file_path = file_path
+    editor_tab.modified = False
+    editor_tab.update_line_numbers()
+    refresh_tab_title(editor_tab)
+    return editor_tab
+
+
+def on_tree_double_click(event=None):
+    selected = file_tree.focus()
+    if not selected:
+        return
+    values = file_tree.item(selected, "values")
+    if not values:
+        return
+    path = values[0]
+    if os.path.isfile(path):
+        open_file_in_new_tab(path)
+
+
+def open_project_folder(event=None):
+    global project_root
+    selected_dir = filedialog.askdirectory()
+    if not selected_dir:
+        return
+
+    project_root = selected_dir
+    project_label_var.set(f"Project: {project_root}")
+    for item in file_tree.get_children():
+        file_tree.delete(item)
+    root_item = file_tree.insert("", "end", text=os.path.basename(project_root) or project_root, open=True, values=(project_root,))
+    populate_tree_node(root_item, project_root)
+
 
 def start_liveshare_with_custom_server(editor_tab):
     if editor_tab is None:
@@ -11,6 +137,7 @@ def start_liveshare_with_custom_server(editor_tab):
 
     def connect():
         server_host = host_entry.get()
+        room_name = room_entry.get().strip() or "default"
         try:
             server_port = int(port_entry.get())
             if server_port <= 0 or server_port > 65535:
@@ -19,23 +146,37 @@ def start_liveshare_with_custom_server(editor_tab):
             messagebox.showerror("LiveShare", "Port must be a number between 1 and 65535.")
             return
         connect_window.destroy()
-        start_liveshare_client(editor_tab, server_host, server_port)
-    
+        start_liveshare_client(editor_tab, server_host, server_port, room_name)
+
     connect_window = tk.Toplevel(root)
     connect_window.title("Connect to LiveShare Server")
-    
-    tk.Label(connect_window, text="Server Host:").grid(row=0, column=0, padx=5, pady=5)
-    host_entry = tk.Entry(connect_window)
+    ui_bg = resolve_ui_bg(bg_color)
+    connect_window.configure(bg=ui_bg)
+
+    tk.Label(connect_window, text="Server Host:", bg=ui_bg, fg=text_color).grid(row=0, column=0, padx=5, pady=5)
+    host_entry = tk.Entry(connect_window, bg=ui_bg, fg=text_color, insertbackground=text_color)
     host_entry.insert(0, "localhost")
     host_entry.grid(row=0, column=1, padx=5, pady=5)
-    
-    tk.Label(connect_window, text="Server Port:").grid(row=1, column=0, padx=5, pady=5)
-    port_entry = tk.Entry(connect_window)
+
+    tk.Label(connect_window, text="Server Port:", bg=ui_bg, fg=text_color).grid(row=1, column=0, padx=5, pady=5)
+    port_entry = tk.Entry(connect_window, bg=ui_bg, fg=text_color, insertbackground=text_color)
     port_entry.insert(0, "9999")
     port_entry.grid(row=1, column=1, padx=5, pady=5)
-    
-    connect_button = tk.Button(connect_window, text="Connect", command=connect)
-    connect_button.grid(row=2, column=0, columnspan=2, pady=10)
+
+    tk.Label(connect_window, text="Room:", bg=ui_bg, fg=text_color).grid(row=2, column=0, padx=5, pady=5)
+    room_entry = tk.Entry(connect_window, bg=ui_bg, fg=text_color, insertbackground=text_color)
+    room_entry.insert(0, editor_tab.liveshare_room or "default")
+    room_entry.grid(row=2, column=1, padx=5, pady=5)
+
+    tk.Button(
+        connect_window,
+        text="Connect",
+        command=connect,
+        bg="#2a2a2a",
+        fg=text_color,
+        activebackground="#3a3a3a",
+        activeforeground=text_color,
+    ).grid(row=3, column=0, columnspan=2, pady=10)
 
 
 def stop_liveshare(editor_tab):
@@ -54,9 +195,15 @@ def stop_liveshare(editor_tab):
             pass
     editor_tab.liveshare_sock = None
     editor_tab.liveshare_active = False
+    editor_tab.liveshare_room = None
+    update_status_bar()
 
 
-def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999):
+def _schedule_stop_liveshare(editor_tab):
+    root.after(0, stop_liveshare, editor_tab)
+
+
+def start_liveshare_client(editor_tab, server_host="localhost", server_port=9999, room_name="default"):
     stop_liveshare(editor_tab)
 
     def receive_updates(sock):
@@ -66,7 +213,7 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
                 data = sock.recv(4096)
                 if not data:
                     break
-                recv_buffer += data.decode('utf-8')
+                recv_buffer += data.decode("utf-8")
 
                 while "\n" in recv_buffer:
                     line, recv_buffer = recv_buffer.split("\n", 1)
@@ -78,12 +225,14 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
                         continue
                     if message.get("type") != "sync":
                         continue
+                    if message.get("room") != editor_tab.liveshare_room:
+                        continue
                     remote_text = message.get("text", "")
                     root.after(0, apply_remote_text, remote_text)
-            except Exception as e:
-                print(f"Gabim në lidhje: {e}")
+            except Exception:
                 break
-        stop_liveshare(editor_tab)
+        if editor_tab.liveshare_sock is sock:
+            _schedule_stop_liveshare(editor_tab)
 
     def apply_remote_text(remote_text):
         current_text = editor_tab.text_area.get("1.0", "end-1c")
@@ -96,23 +245,26 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
             return
         try:
             text = editor_tab.text_area.get("1.0", "end-1c")
-            payload = json.dumps({"type": "sync", "text": text}) + "\n"
-            editor_tab.liveshare_sock.sendall(payload.encode('utf-8'))
-        except Exception as e:
-            print(f"Gabim në dërgim: {e}")
+            payload = json.dumps({"type": "sync", "room": editor_tab.liveshare_room, "text": text}) + "\n"
+            editor_tab.liveshare_sock.sendall(payload.encode("utf-8"))
+        except Exception:
             stop_liveshare(editor_tab)
 
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(5)  # Timeout prej 5 sekondash
+        sock.settimeout(5)
         sock.connect((server_host, server_port))
         sock.settimeout(None)
         editor_tab.liveshare_sock = sock
         editor_tab.liveshare_active = True
+        editor_tab.liveshare_room = room_name
+        join_payload = json.dumps({"type": "join", "room": room_name}) + "\n"
+        editor_tab.liveshare_sock.sendall(join_payload.encode("utf-8"))
         threading.Thread(target=receive_updates, args=(sock,), daemon=True).start()
-        # add="+" keeps existing key handlers (line numbers, modified flag, etc.)
         editor_tab.liveshare_handler_id = editor_tab.text_area.bind("<KeyRelease>", on_key_release, add="+")
-        messagebox.showinfo("LiveShare", f"U lidh me serverin {server_host}:{server_port}")
+        on_key_release()
+        update_status_bar()
+        messagebox.showinfo("LiveShare", f"Connected to {server_host}:{server_port} (room: {room_name})")
     except socket.timeout:
         stop_liveshare(editor_tab)
         messagebox.showerror("LiveShare", f"Timeout - Serveri nuk u gjet në {server_host}:{server_port}")
@@ -123,166 +275,199 @@ def start_liveshare_client(editor_tab, server_host='localhost', server_port=9999
         stop_liveshare(editor_tab)
         messagebox.showerror("LiveShare", f"Nuk u lidh: {e}")
 
-# Funksioni Per Autosave
+
 def autosave():
     for editor_tab in tabs.values():
         if editor_tab.modified and editor_tab.file_path:
             try:
-                with open(editor_tab.file_path, 'w', encoding='utf-8') as file:
+                with open(editor_tab.file_path, "w", encoding="utf-8") as file:
                     file.write(editor_tab.text_area.get("1.0", "end-1c"))
                 editor_tab.modified = False
-
-                # Përditëso titullin duke hequr "*" nëse ekziston
-                tab_index = notebook.index(editor_tab.frame)
-                current_text = notebook.tab(tab_index, "text")
-                if current_text.endswith("*"):
-                    notebook.tab(tab_index, text=current_text.rstrip("*"))
-
+                refresh_tab_title(editor_tab)
             except Exception as e:
                 print(f"Gabim gjatë autoruajtjes: {e}")
-    
-    # Rikrijo thirrjen pas 2 minutash (120000 ms)
     root.after(120000, autosave)
 
 
-
-
-
-# Funksioni per te lexuar konfigurimin e ngjyrave nga nje skedar
 def load_colors():
     try:
-        with open('settings.json', 'r') as file:
+        with open("settings.json", "r") as file:
             settings = json.load(file)
-        return (settings.get('text_color', 'green'), 
-                settings.get('bg_color', 'black'), 
-                settings.get('font_size', 12))
+        return (
+            settings.get("text_color", "green"),
+            settings.get("bg_color", "black"),
+            settings.get("font_size", 12),
+        )
     except (FileNotFoundError, json.JSONDecodeError):
-        return 'green', 'black', 12  # Ngjyrat dhe madhesia default
+        return "green", "black", 12
 
-# Funksioni per te ruajtur konfigurimin e ngjyrave ne nje skedar
-def save_colors(text_color, bg_color, font_size):
+
+def apply_ui_theme():
+    ui_bg = resolve_ui_bg(bg_color)
+    root.configure(bg=bg_color)
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure(".", background=ui_bg, foreground=text_color)
+    style.configure("TFrame", background=ui_bg)
+    style.configure("TLabel", background=ui_bg, foreground=text_color)
+    style.configure("TNotebook", background=ui_bg, borderwidth=0)
+    style.configure("TNotebook.Tab", background=ui_bg, foreground=text_color, padding=(10, 4))
+    style.configure("TEntry", fieldbackground=ui_bg, foreground=text_color)
+    style.configure("TButton", background="#2a2a2a", foreground=text_color)
+    style.configure("Treeview", background=ui_bg, foreground=text_color, fieldbackground=ui_bg)
+    style.configure("Treeview.Heading", background="#2a2a2a", foreground=text_color)
+    style.map("TNotebook.Tab", background=[("selected", "#2a2a2a"), ("active", "#1f1f1f")], foreground=[("selected", text_color), ("active", text_color)])
+
+
+def save_colors(text_color_value, bg_color_value, font_size_value):
     settings = {
-        'text_color': text_color,
-        'bg_color': bg_color,
-        'font_size': font_size
+        "text_color": text_color_value,
+        "bg_color": bg_color_value,
+        "font_size": font_size_value,
     }
-    with open('settings.json', 'w') as file:
+    with open("settings.json", "w") as file:
         json.dump(settings, file)
 
-# Klasa per Ã§do tab te editorit
+
 class EditorTab:
-    def __init__(self, parent, text_color, bg_color, font_size):
+    def __init__(self, parent, text_color_value, bg_color_value, font_size_value):
         self.frame = ttk.Frame(parent)
-        self.text_color = text_color
-        self.bg_color = bg_color
-        self.font_size = font_size
-        self.file_path = None  # Rruga e skedarit
-        self.modified = False  # Nese ka ndryshime te paruajtura
+        self.text_color = text_color_value
+        self.bg_color = bg_color_value
+        self.font_size = font_size_value
+        self.file_path = None
+        self.modified = False
         self.liveshare_sock = None
         self.liveshare_active = False
         self.liveshare_handler_id = None
-        
-        # Krijojme Frame per te mbajtur canvas dhe scrollbar
-        editor_frame = tk.Frame(self.frame)
+        self.liveshare_room = None
+
+        editor_frame = tk.Frame(self.frame, bg=bg_color_value)
         editor_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Canvas per numrat e linjave
-        self.line_numbers_canvas = tk.Canvas(
-            editor_frame, 
-            width=54, 
-            bg=bg_color, 
-            bd=0, 
-            highlightthickness=0
-        )
+
+        self.line_numbers_canvas = tk.Canvas(editor_frame, width=54, bg=bg_color_value, bd=0, highlightthickness=0)
         self.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y)
-        
-        # Zona e tekstit
+
         self.text_area = tk.Text(
-            editor_frame, 
-            wrap=tk.WORD, 
-            width=80, 
-            height=20, 
-            font=("Courier New", font_size),
-            bg=bg_color, 
-            fg=text_color, 
-            insertbackground=text_color, 
-            undo=True
+            editor_frame,
+            wrap=tk.WORD,
+            width=80,
+            height=20,
+            font=("Courier New", font_size_value),
+            bg=bg_color_value,
+            fg=text_color_value,
+            insertbackground=text_color_value,
+            undo=True,
         )
         self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Scrollbar
+
         self.scrollbar = tk.Scrollbar(
-            editor_frame, 
-            command=self.on_scroll
+            editor_frame,
+            command=self.on_scroll,
+            bg="#2a2a2a",
+            activebackground="#3a3a3a",
+            troughcolor=bg_color_value,
+            highlightthickness=0,
         )
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
+
         self.text_area.config(yscrollcommand=self.on_text_scroll)
-        
-        # Lidh eventet per update te numrave te linjave
         self.text_area.bind("<KeyRelease>", self.update_line_numbers)
         self.text_area.bind("<MouseWheel>", self.update_line_numbers)
         self.text_area.bind("<Button-1>", self.update_line_numbers)
         self.text_area.bind("<Configure>", self.update_line_numbers)
-        
-        # Lidh eventin per ndryshime
         self.text_area.bind("<<Modified>>", self.on_text_modified)
-    
+        self.text_area.bind("<KeyRelease>", update_status_bar, add="+")
+        self.text_area.bind("<ButtonRelease-1>", update_status_bar, add="+")
+
     def on_scroll(self, *args):
         self.text_area.yview(*args)
         self.line_numbers_canvas.yview_moveto(args[0])
         self.update_line_numbers()
-    
+
     def on_text_scroll(self, *args):
         self.scrollbar.set(*args)
         self.line_numbers_canvas.yview_moveto(args[0])
         self.update_line_numbers()
-    
+
     def update_line_numbers(self, event=None):
         self.line_numbers_canvas.delete("all")
-        i = self.text_area.index("@0,0")  # index i pare qe shfaqet ne fillim te view
-        
+        idx = self.text_area.index("@0,0")
         while True:
-            dline = self.text_area.dlineinfo(i)
+            dline = self.text_area.dlineinfo(idx)
             if dline is None:
                 break
             y = dline[1]
-            line_number = str(i).split(".")[0]
-            self.line_numbers_canvas.create_text(
-                5, y, anchor="nw", text=line_number, 
-                fill="gray", font=("Courier New", self.font_size)
-            )
-            i = self.text_area.index(f"{i}+1line")
-    
+            line_number = str(idx).split(".")[0]
+            self.line_numbers_canvas.create_text(5, y, anchor="nw", text=line_number, fill="gray", font=("Courier New", self.font_size))
+            idx = self.text_area.index(f"{idx}+1line")
+
     def on_text_modified(self, event=None):
         if self.text_area.edit_modified():
             self.modified = True
-            # Perditeso titullin e tabit per te treguar se ka ndryshime
-            tab_index = notebook.index(self.frame)
-            current_text = notebook.tab(tab_index, "text")
-            if not current_text.endswith("*"):
-                notebook.tab(tab_index, text=current_text + "*")
+            refresh_tab_title(self)
             self.text_area.edit_modified(False)
 
-# Krijo dritaren kryesore
+
 root = tk.Tk()
 root.title("Nullsec8 Editor")
 
-# Perdor ngjyrat e ruajtura nga skedari
 text_color, bg_color, current_font_size = load_colors()
-
-# Ndrysho fontin dhe ngjyrat per te krijuar atmosferen e nje terminali
+option_bg = resolve_ui_bg(bg_color)
 root.config(bg=bg_color)
+root.option_add("*Background", option_bg)
+root.option_add("*Foreground", text_color)
+root.option_add("*Entry.Background", option_bg)
+root.option_add("*Entry.Foreground", text_color)
+root.option_add("*Entry.InsertBackground", text_color)
+root.option_add("*Text.Background", option_bg)
+root.option_add("*Text.Foreground", text_color)
+root.option_add("*Text.InsertBackground", text_color)
+root.option_add("*Menu.Background", option_bg)
+root.option_add("*Menu.Foreground", text_color)
+root.option_add("*Menu.ActiveBackground", "#2a2a2a")
+root.option_add("*Menu.ActiveForeground", text_color)
+root.option_add("*Button.Background", "#2a2a2a")
+root.option_add("*Button.Foreground", text_color)
+root.option_add("*Toplevel.Background", option_bg)
 
-# Notebook per tabs
-notebook = ttk.Notebook(root)
-notebook.pack(fill=tk.BOTH, expand=True)
-
-# Dictionary per te mbajtur te dhenat e tabave
+project_root = None
+status_var = tk.StringVar(value="Ready")
+project_label_var = tk.StringVar(value="Project: (none)")
 tabs = {}
 next_tab_id = 1
 
-# Funksioni per te krijuar nje tab te ri
+main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=option_bg, sashwidth=5)
+main_pane.pack(fill=tk.BOTH, expand=True)
+
+left_sidebar = tk.Frame(main_pane, bg=option_bg, width=240)
+main_pane.add(left_sidebar, minsize=180)
+
+right_panel = tk.Frame(main_pane, bg=bg_color)
+main_pane.add(right_panel, stretch="always")
+
+project_header = tk.Label(left_sidebar, textvariable=project_label_var, bg=option_bg, fg=text_color, anchor="w")
+project_header.pack(fill=tk.X, padx=6, pady=(6, 2))
+
+file_tree = ttk.Treeview(left_sidebar, columns=("path",), show="tree")
+file_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+file_tree.bind("<<TreeviewOpen>>", on_tree_open)
+file_tree.bind("<Double-1>", on_tree_double_click)
+
+notebook = ttk.Notebook(right_panel)
+notebook.pack(fill=tk.BOTH, expand=True)
+
+status_bar = tk.Label(root, textvariable=status_var, bg="#2a2a2a", fg=text_color, anchor="w")
+status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+apply_ui_theme()
+
+
 def create_new_tab(title="New File"):
     global next_tab_id
     tab_id = next_tab_id
@@ -291,9 +476,10 @@ def create_new_tab(title="New File"):
     tabs[tab_id] = editor_tab
     notebook.add(editor_tab.frame, text=title)
     notebook.select(editor_tab.frame)
+    refresh_tab_title(editor_tab)
     return editor_tab
 
-# Funksioni per te marre tabin aktual
+
 def get_current_tab():
     selected_tab = notebook.select()
     for editor_tab in tabs.values():
@@ -301,229 +487,288 @@ def get_current_tab():
             return editor_tab
     return None
 
-# Funksioni per te hapur nje skedar
-def hap_skedar(event=None):
-    try:
-        file_path = filedialog.askopenfilename(
-            defaultextension=".txt", 
-            filetypes=[("All Files", "*.*"), ("Text files", "*.txt")]
-        )
-        if file_path:
-            with open(file_path, 'r', encoding='utf-8') as file:
-                content = file.read()
-            
-            # Krijo nje tab te ri
-            tab_title = file_path.split("/")[-1]  # Merr emrin e skedarit
-            editor_tab = create_new_tab(tab_title)
-            editor_tab.text_area.delete(1.0, tk.END)
-            editor_tab.text_area.insert(tk.END, content)
-            editor_tab.file_path = file_path
-            editor_tab.modified = False
-            editor_tab.update_line_numbers()
-    except Exception as e:
-        messagebox.showerror("Error", f"Gabim gjate hapjes se skedarit: {e}")
 
-# Funksioni per te ruajtur nje skedar
+def hap_skedar(event=None):
+    file_path = filedialog.askopenfilename(defaultextension=".txt", filetypes=[("All Files", "*.*"), ("Text files", "*.txt")])
+    if file_path:
+        open_file_in_new_tab(file_path)
+
+
 def ruaj_skedar(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
     try:
-        # Nese skedari nuk ekziston, pyet per vendndodhjen e ruajtjes
         if not editor_tab.file_path:
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".txt", 
-                filetypes=[("All Files", "*.*"), ("Text files", "*.txt")]
-            )
+            file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("All Files", "*.*"), ("Text files", "*.txt")])
             if not file_path:
                 return
             editor_tab.file_path = file_path
-        
-        with open(editor_tab.file_path, 'w', encoding='utf-8') as file:
-            file.write(editor_tab.text_area.get(1.0, tk.END))
-        
+
+        with open(editor_tab.file_path, "w", encoding="utf-8") as file:
+            file.write(editor_tab.text_area.get("1.0", "end-1c"))
+
         editor_tab.modified = False
-        # Largo * nga titulli i tabit
-        tab_index = notebook.index(editor_tab.frame)
-        current_text = notebook.tab(tab_index, "text")
-        if current_text.endswith("*"):
-            notebook.tab(tab_index, text=current_text.rstrip("*"))
-        
+        refresh_tab_title(editor_tab)
     except Exception as e:
         messagebox.showerror("Error", f"Gabim gjate ruajtjes se skedarit: {e}")
 
-# Funksioni per ruajtje si
+
 def ruaj_si_skedar(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
     try:
-        file_path = filedialog.asksaveasfilename(
-            defaultextension=".txt", 
-            filetypes=[("All Files", "*.*"), ("Text files", "*.txt")]
-        )
-        if file_path:
-            with open(file_path, 'w', encoding='utf-8') as file:
-                file.write(editor_tab.text_area.get(1.0, tk.END))
-            
-            editor_tab.file_path = file_path
-            editor_tab.modified = False
-            
-            # Perditeso titullin e tabit
-            tab_title = file_path.split("/")[-1]
-            tab_index = notebook.index(editor_tab.frame)
-            notebook.tab(tab_index, text=tab_title)
-            
+        file_path = filedialog.asksaveasfilename(defaultextension=".txt", filetypes=[("All Files", "*.*"), ("Text files", "*.txt")])
+        if not file_path:
+            return
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(editor_tab.text_area.get("1.0", "end-1c"))
+        editor_tab.file_path = file_path
+        editor_tab.modified = False
+        refresh_tab_title(editor_tab)
     except Exception as e:
         messagebox.showerror("Error", f"Gabim gjate ruajtjes se skedarit: {e}")
 
-# Funksioni per te ndryshuar ngjyren e tekstit
+
 def ndrysho_ngjyren_tekstit(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
-    ngjyra = colorchooser.askcolor()[1]  # Merr ngjyren nga color picker
-    if ngjyra:
-        editor_tab.text_area.config(fg=ngjyra)
-        editor_tab.text_area.config(insertbackground=ngjyra)
-        editor_tab.text_color = ngjyra
-        
-        # Ruaj ne cilesimet globale
-        global text_color
-        text_color = ngjyra
-        save_colors(text_color, bg_color, current_font_size)
+    ngjyra = colorchooser.askcolor()[1]
+    if not ngjyra:
+        return
+    global text_color
+    text_color = ngjyra
+    for tab in tabs.values():
+        tab.text_color = ngjyra
+        apply_text_area_theme(tab)
+    apply_ui_theme()
+    update_status_bar()
+    save_colors(text_color, bg_color, current_font_size)
 
-# Funksioni per te ndryshuar ngjyren e fonit
+
 def ndrysho_ngjyren_fonit(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
-    ngjyra = colorchooser.askcolor()[1]  # Merr ngjyren nga color picker
-    if ngjyra:
-        editor_tab.text_area.config(bg=ngjyra)
-        editor_tab.line_numbers_canvas.config(bg=ngjyra)
-        editor_tab.bg_color = ngjyra
-        
-        # Ruaj ne cilesimet globale
-        global bg_color
-        bg_color = ngjyra
-        save_colors(text_color, bg_color, current_font_size)
+    ngjyra = colorchooser.askcolor()[1]
+    if not ngjyra:
+        return
+    global bg_color, option_bg
+    bg_color = ngjyra
+    option_bg = resolve_ui_bg(bg_color)
+    for tab in tabs.values():
+        tab.bg_color = ngjyra
+        apply_text_area_theme(tab)
+    apply_ui_theme()
+    update_status_bar()
+    save_colors(text_color, bg_color, current_font_size)
 
-# Funksioni per te hapur dritaren e ndihmes
+
 def shfaq_help():
     help_text = (
         "Shortcuts:\n"
         "Ctrl+N - New file\n"
         "Ctrl+O - Open file\n"
+        "Ctrl+Shift+O - Open folder\n"
         "Ctrl+S - Save file\n"
         "Ctrl+Shift+S - Save as\n"
         "Ctrl+W - Close tab\n"
-        "Ctrl+T - Change text color\n"
-        "Ctrl+B - Change background color\n"
         "Ctrl+F - Find text\n"
-        "Ctrl++ - Zoom in\n"
-        "Ctrl+- - Zoom out\n"   
-        "Ctrl+Q - Exit\n"
+        "Ctrl+H - Find/Replace\n"
     )
     messagebox.showinfo("Help", help_text)
 
-# Funksioni per kerkimin ne tekst
+
 def find_text(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
-    # Krijo nje dritare per kerkim
-    find_window = tk.Toplevel(root)
-    find_window.title("Find Text")
-    find_window.transient(root)
-    find_window.resizable(False, False)
-    
-    tk.Label(find_window, text="Find:").grid(row=0, column=0, padx=10, pady=5, sticky='e')
-    search_entry = tk.Entry(find_window, width=40)
-    search_entry.grid(row=0, column=1, padx=10, pady=5)
-    search_entry.focus_set()
-    
-    def search():
-        text_to_find = search_entry.get()
-        if text_to_find:
-            start_pos = editor_tab.text_area.search(text_to_find, "1.0", stopindex=tk.END)
-            if start_pos:
-                end_pos = f"{start_pos}+{len(text_to_find)}c"
-                editor_tab.text_area.tag_remove("highlight", "1.0", tk.END)
-                editor_tab.text_area.tag_add("highlight", start_pos, end_pos)
-                editor_tab.text_area.tag_configure("highlight", background="yellow")
-                editor_tab.text_area.mark_set("insert", end_pos)  # Vendos kursorin tek perputhja e pare
-                editor_tab.text_area.see(start_pos)  # Shiko perputhjen
-            else:
-                messagebox.showinfo("Info", "Text not found.")
-    
-    tk.Button(find_window, text="Find", command=search).grid(row=1, column=0, columnspan=2, pady=5)
+    needle = simple_text_prompt("Find", "Find text:")
+    if not needle:
+        return
+    editor_tab.text_area.tag_remove("highlight", "1.0", tk.END)
+    pos = editor_tab.text_area.search(needle, "1.0", stopindex=tk.END)
+    if not pos:
+        messagebox.showinfo("Info", "Text not found.")
+        return
+    end = f"{pos}+{len(needle)}c"
+    editor_tab.text_area.tag_add("highlight", pos, end)
+    editor_tab.text_area.tag_configure("highlight", background="yellow")
+    editor_tab.text_area.mark_set("insert", end)
+    editor_tab.text_area.see(pos)
+    update_status_bar()
 
-# Funksioni per zmadhimin e tekstit (zoom in)
+
+def simple_text_prompt(title, label_text):
+    prompt = tk.Toplevel(root)
+    prompt.title(title)
+    prompt.configure(bg=option_bg)
+    prompt.transient(root)
+    prompt.grab_set()
+    tk.Label(prompt, text=label_text, bg=option_bg, fg=text_color).pack(padx=10, pady=(10, 4))
+    value_var = tk.StringVar()
+    entry = tk.Entry(prompt, textvariable=value_var, width=40, bg=option_bg, fg=text_color, insertbackground=text_color)
+    entry.pack(padx=10, pady=4)
+    entry.focus_set()
+    done = {"ok": False}
+
+    def ok():
+        done["ok"] = True
+        prompt.destroy()
+
+    def cancel():
+        prompt.destroy()
+
+    buttons = tk.Frame(prompt, bg=option_bg)
+    buttons.pack(pady=(4, 10))
+    tk.Button(buttons, text="OK", command=ok, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
+    tk.Button(buttons, text="Cancel", command=cancel, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
+    prompt.bind("<Return>", lambda e: ok())
+    prompt.bind("<Escape>", lambda e: cancel())
+    prompt.wait_window()
+    if done["ok"]:
+        return value_var.get()
+    return None
+
+
+def show_find_replace(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Find / Replace")
+    win.configure(bg=option_bg)
+    win.transient(root)
+
+    tk.Label(win, text="Find:", bg=option_bg, fg=text_color).grid(row=0, column=0, padx=8, pady=6, sticky="e")
+    tk.Label(win, text="Replace:", bg=option_bg, fg=text_color).grid(row=1, column=0, padx=8, pady=6, sticky="e")
+
+    find_var = tk.StringVar()
+    replace_var = tk.StringVar()
+    find_entry = tk.Entry(win, textvariable=find_var, width=36, bg=option_bg, fg=text_color, insertbackground=text_color)
+    replace_entry = tk.Entry(win, textvariable=replace_var, width=36, bg=option_bg, fg=text_color, insertbackground=text_color)
+    find_entry.grid(row=0, column=1, padx=8, pady=6)
+    replace_entry.grid(row=1, column=1, padx=8, pady=6)
+    find_entry.focus_set()
+
+    def do_find_next():
+        needle = find_var.get()
+        if not needle:
+            return
+        text_widget = editor_tab.text_area
+        start = text_widget.index("insert")
+        pos = text_widget.search(needle, start, stopindex=tk.END)
+        if not pos:
+            pos = text_widget.search(needle, "1.0", stopindex=start)
+        text_widget.tag_remove("highlight", "1.0", tk.END)
+        if not pos:
+            messagebox.showinfo("Find/Replace", "Text not found.")
+            return
+        end = f"{pos}+{len(needle)}c"
+        text_widget.tag_add("highlight", pos, end)
+        text_widget.tag_configure("highlight", background="yellow")
+        text_widget.mark_set("insert", end)
+        text_widget.see(pos)
+        update_status_bar()
+
+    def do_replace():
+        needle = find_var.get()
+        repl = replace_var.get()
+        if not needle:
+            return
+        text_widget = editor_tab.text_area
+        sel_start = text_widget.tag_ranges(tk.SEL)
+        if sel_start:
+            start = text_widget.index(tk.SEL_FIRST)
+            end = text_widget.index(tk.SEL_LAST)
+            if text_widget.get(start, end) == needle:
+                text_widget.delete(start, end)
+                text_widget.insert(start, repl)
+                editor_tab.modified = True
+                refresh_tab_title(editor_tab)
+        do_find_next()
+
+    def do_replace_all():
+        needle = find_var.get()
+        repl = replace_var.get()
+        if not needle:
+            return
+        text_widget = editor_tab.text_area
+        content = text_widget.get("1.0", "end-1c")
+        count = content.count(needle)
+        if count == 0:
+            messagebox.showinfo("Find/Replace", "No matches found.")
+            return
+        content = content.replace(needle, repl)
+        text_widget.delete("1.0", tk.END)
+        text_widget.insert("1.0", content)
+        editor_tab.modified = True
+        refresh_tab_title(editor_tab)
+        messagebox.showinfo("Find/Replace", f"Replaced {count} matches.")
+
+    button_row = tk.Frame(win, bg=option_bg)
+    button_row.grid(row=2, column=0, columnspan=2, pady=(6, 10))
+    tk.Button(button_row, text="Find Next", command=do_find_next, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
+    tk.Button(button_row, text="Replace", command=do_replace, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
+    tk.Button(button_row, text="Replace All", command=do_replace_all, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
+
+
 def zoom_in(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
     global current_font_size
     current_font_size += 1
-    editor_tab.text_area.config(font=("Courier New", current_font_size))
-    editor_tab.font_size = current_font_size
-    editor_tab.update_line_numbers()
+    for tab in tabs.values():
+        tab.font_size = current_font_size
+        apply_text_area_theme(tab)
     save_colors(text_color, bg_color, current_font_size)
+    update_status_bar()
 
-# Funksioni per zvogelimin e tekstit (zoom out)
+
 def zoom_out(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
         return
-    
     global current_font_size
-    if current_font_size > 1:  # Sigurohemi qe madhesia te mos behet negative
+    if current_font_size > 1:
         current_font_size -= 1
-        editor_tab.text_area.config(font=("Courier New", current_font_size))
-        editor_tab.font_size = current_font_size
-        editor_tab.update_line_numbers()
+        for tab in tabs.values():
+            tab.font_size = current_font_size
+            apply_text_area_theme(tab)
         save_colors(text_color, bg_color, current_font_size)
+        update_status_bar()
 
-# Funksioni per te krijuar nje skedar te ri
+
 def new_file(event=None):
     create_new_tab()
 
-# Funksioni per te mbyllur tabin aktual
+
 def close_tab(event=None):
     current_tab = get_current_tab()
     if current_tab is None:
         return
-    
-    # Nëse ka lidhje liveshare, mbylle atë
     stop_liveshare(current_tab)
-
     if current_tab.modified:
-        result = messagebox.askyesnocancel(
-            "Save Changes", 
-            "Do you want to save changes before closing?"
-        )
-        if result is None:  # Cancel
+        result = messagebox.askyesnocancel("Save Changes", "Do you want to save changes before closing?")
+        if result is None:
             return
-        if result:  # Yes
+        if result:
             ruaj_skedar()
-    
+
     tab_index = notebook.index(notebook.select())
     notebook.forget(tab_index)
-    
-    # Largo nga dictionary
+
     for tab_id, editor_tab in list(tabs.items()):
         if editor_tab is current_tab:
             del tabs[tab_id]
             break
+    update_status_bar()
 
-# Shto support per Undo/Redo
+
 def undo(event=None):
     editor_tab = get_current_tab()
     if editor_tab:
@@ -531,6 +776,8 @@ def undo(event=None):
             editor_tab.text_area.edit_undo()
         except tk.TclError:
             pass
+    update_status_bar()
+
 
 def redo(event=None):
     editor_tab = get_current_tab()
@@ -539,16 +786,17 @@ def redo(event=None):
             editor_tab.text_area.edit_redo()
         except tk.TclError:
             pass
+    update_status_bar()
 
-# Krijo nje menu
-menu = tk.Menu(root)
+
+menu = tk.Menu(root, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 root.config(menu=menu)
 
-# Shto opsionet e menu-se
-file_menu = tk.Menu(menu, tearoff=0)
+file_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="File", menu=file_menu)
 file_menu.add_command(label="New", command=new_file, accelerator="Ctrl+N")
 file_menu.add_command(label="Open", command=hap_skedar, accelerator="Ctrl+O")
+file_menu.add_command(label="Open Folder", command=open_project_folder, accelerator="Ctrl+Shift+O")
 file_menu.add_command(label="Save", command=ruaj_skedar, accelerator="Ctrl+S")
 file_menu.add_command(label="Save As", command=ruaj_si_skedar, accelerator="Ctrl+Shift+S")
 file_menu.add_separator()
@@ -558,8 +806,7 @@ file_menu.add_command(label="Exit", command=root.quit, accelerator="Ctrl+Q")
 file_menu.add_separator()
 file_menu.add_command(label="Start LiveShare", command=lambda: start_liveshare_with_custom_server(get_current_tab()))
 
-# Shto opsione per ngjyra
-edit_menu = tk.Menu(menu, tearoff=0)
+edit_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Edit", menu=edit_menu)
 edit_menu.add_command(label="Change Text Color", command=ndrysho_ngjyren_tekstit, accelerator="Ctrl+T")
 edit_menu.add_command(label="Change Background Color", command=ndrysho_ngjyren_fonit, accelerator="Ctrl+B")
@@ -568,34 +815,37 @@ edit_menu.add_command(label="Undo", command=undo, accelerator="Ctrl+Z")
 edit_menu.add_command(label="Redo", command=redo, accelerator="Ctrl+Y")
 edit_menu.add_separator()
 edit_menu.add_command(label="Find", command=find_text, accelerator="Ctrl+F")
+edit_menu.add_command(label="Find / Replace", command=show_find_replace, accelerator="Ctrl+H")
 
-# Shto opsione per zoom
-view_menu = tk.Menu(menu, tearoff=0)
+view_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="View", menu=view_menu)
 view_menu.add_command(label="Zoom In", command=zoom_in, accelerator="Ctrl++")
 view_menu.add_command(label="Zoom Out", command=zoom_out, accelerator="Ctrl+-")
 
-# Shto opsionin Help
-help_menu = tk.Menu(menu, tearoff=0)
+help_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Help", menu=help_menu)
 help_menu.add_command(label="Help", command=shfaq_help)
 
-# Perdorimi i shkurtesave te tastieres
-root.bind("<Control-n>", new_file)  # Ctrl+N per skedar te ri
-root.bind("<Control-o>", hap_skedar)  # Ctrl+O per te hapur nje skedar
-root.bind("<Control-s>", ruaj_skedar)  # Ctrl+S per te ruajtur nje skedar
-root.bind("<Control-Shift-S>", ruaj_si_skedar)  # Ctrl+Shift+S per Save As
-root.bind("<Control-w>", close_tab)  # Ctrl+W per te mbyllur tabin
-root.bind("<Control-t>", ndrysho_ngjyren_tekstit)  # Ctrl+T per te ndryshuar ngjyren e tekstit
-root.bind("<Control-b>", ndrysho_ngjyren_fonit)  # Ctrl+B per te ndryshuar ngjyren e fonit
-root.bind("<Control-f>", find_text)  # Ctrl+F per te hapur dritaren e kerkimit
-root.bind("<Control-q>", lambda e: root.quit())  # Ctrl+Q per te mbyllur aplikacionin
-root.bind("<Control-plus>", zoom_in)  # Ctrl++ per zmadhim
-root.bind("<Control-minus>", zoom_out)  # Ctrl+- per zvogelim
-root.bind("<Control-z>", undo)  # Ctrl+Z per Undo
-root.bind("<Control-y>", redo)  # Ctrl+Y per Redo
+root.bind("<Control-n>", new_file)
+root.bind("<Control-o>", hap_skedar)
+root.bind("<Control-O>", open_project_folder)
+root.bind("<Control-Shift-O>", open_project_folder)
+root.bind("<Control-s>", ruaj_skedar)
+root.bind("<Control-Shift-S>", ruaj_si_skedar)
+root.bind("<Control-Shift-s>", ruaj_si_skedar)
+root.bind("<Control-w>", close_tab)
+root.bind("<Control-t>", ndrysho_ngjyren_tekstit)
+root.bind("<Control-b>", ndrysho_ngjyren_fonit)
+root.bind("<Control-f>", find_text)
+root.bind("<Control-h>", show_find_replace)
+root.bind("<Control-q>", lambda e: root.quit())
+root.bind("<Control-plus>", zoom_in)
+root.bind("<Control-minus>", zoom_out)
+root.bind("<Control-z>", undo)
+root.bind("<Control-y>", redo)
+notebook.bind("<<NotebookTabChanged>>", update_status_bar)
 
-# Starto aplikacionin me nje tab te zbrazet
 create_new_tab()
 autosave()
+update_status_bar()
 root.mainloop()

@@ -1,25 +1,38 @@
+import json
 import socket
 import threading
-import json
 
-clients = set()
+# Track each client socket and its current room.
+clients = {}
 clients_lock = threading.Lock()
 
 
 def _remove_client(conn):
     with clients_lock:
-        clients.discard(conn)
+        clients.pop(conn, None)
     try:
         conn.close()
     except OSError:
         pass
 
 
+def _set_client_room(conn, room):
+    with clients_lock:
+        if conn in clients:
+            clients[conn] = room
+
+
+def _get_client_room(conn):
+    with clients_lock:
+        return clients.get(conn, "default")
+
+
 def broadcast(msg, sender=None):
+    room = msg.get("room", "default")
     payload = (json.dumps(msg) + "\n").encode("utf-8")
 
     with clients_lock:
-        recipients = [c for c in clients if c != sender]
+        recipients = [c for c, c_room in clients.items() if c != sender and c_room == room]
 
     for c in recipients:
         try:
@@ -30,7 +43,7 @@ def broadcast(msg, sender=None):
 
 def handle_client(conn):
     with clients_lock:
-        clients.add(conn)
+        clients[conn] = "default"
     print("Client connected:", conn.getpeername())
     recv_buffer = ""
 
@@ -50,6 +63,18 @@ def handle_client(conn):
                     msg = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                msg_type = msg.get("type")
+                if msg_type == "join":
+                    room = msg.get("room", "default")
+                    _set_client_room(conn, room)
+                    continue
+
+                if msg_type != "sync":
+                    continue
+
+                if "room" not in msg:
+                    msg["room"] = _get_client_room(conn)
                 broadcast(msg, conn)
 
         except OSError:
