@@ -571,7 +571,7 @@ class EditorTab:
             wrap=tk.WORD,
             width=80,
             height=20,
-            font=editor_font,
+            font=("Consolas", font_size_value),
             bg=bg_color_value,
             fg=text_color_value,
             insertbackground=text_color_value,
