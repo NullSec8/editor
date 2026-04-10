@@ -1,11 +1,93 @@
 import json
 import keyword
 import os
+import platform
 import re
 import socket
+import subprocess
+import sys
 import threading
 import time
-import tkinter as tk
+import importlib
+import shutil
+
+
+REQUIRED_PIP_MODULES = {}
+
+
+def _run_command(cmd):
+    try:
+        return subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+    except Exception:
+        return False
+
+
+def _install_missing_pip_modules():
+    for module_name, pip_name in REQUIRED_PIP_MODULES.items():
+        try:
+            importlib.import_module(module_name)
+            continue
+        except ModuleNotFoundError:
+            pass
+        print(f"Missing module '{module_name}'. Installing '{pip_name}'...")
+        _run_command([sys.executable, "-m", "pip", "install", pip_name])
+
+
+def _try_install_tkinter_linux():
+    pkg_managers = [
+        (["apt-get", "update"], ["apt-get", "install", "-y", "python3-tk"], "sudo apt-get install -y python3-tk"),
+        (["dnf", "install", "-y", "python3-tkinter"], None, "sudo dnf install -y python3-tkinter"),
+        (["yum", "install", "-y", "python3-tkinter"], None, "sudo yum install -y python3-tkinter"),
+        (["pacman", "-Sy", "--noconfirm", "tk"], None, "sudo pacman -Sy --noconfirm tk"),
+    ]
+    is_root = hasattr(os, "geteuid") and os.geteuid() == 0
+    for pre_cmd, install_cmd, hint in pkg_managers:
+        if not shutil.which(pre_cmd[0]):
+            continue
+        if is_root:
+            if _run_command(pre_cmd) and (install_cmd is None or _run_command(install_cmd)):
+                return True, hint
+        elif shutil.which("sudo"):
+            sudo_pre = ["sudo", "-n"] + pre_cmd
+            sudo_install = ["sudo", "-n"] + install_cmd if install_cmd else None
+            if _run_command(sudo_pre) and (sudo_install is None or _run_command(sudo_install)):
+                return True, hint
+        return False, hint
+    return False, "Install Tk for your Linux distro (example: sudo apt-get install -y python3-tk)"
+
+
+def _ensure_tkinter():
+    try:
+        import tkinter as tkinter_module
+        return tkinter_module
+    except ModuleNotFoundError:
+        pass
+
+    print("tkinter is missing. Attempting automatic installation...")
+    system_name = platform.system().lower()
+    hint = "Install Tkinter for your platform and run the editor again."
+
+    if system_name == "linux":
+        installed, hint = _try_install_tkinter_linux()
+        if installed:
+            try:
+                import tkinter as tkinter_module
+                print("tkinter installed successfully.")
+                return tkinter_module
+            except ModuleNotFoundError:
+                pass
+    elif system_name == "darwin":
+        hint = "Install Python with Tk support (for Homebrew Python, reinstall Python and tkinter support)."
+    elif system_name == "windows":
+        hint = "Reinstall Python from python.org and ensure Tcl/Tk is selected in the installer."
+
+    print("Automatic tkinter installation failed.")
+    print(f"Manual fix: {hint}")
+    raise ModuleNotFoundError("No module named 'tkinter'")
+
+
+_install_missing_pip_modules()
+tk = _ensure_tkinter()
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 MAX_RECENT_FILES = 10
