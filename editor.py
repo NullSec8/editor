@@ -11,6 +11,12 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 MAX_RECENT_FILES = 10
 SETTINGS_FILE = "settings.json"
 APP_START_TIME = time.time()
+DEFAULT_TEXT_COLOR = "#d7dde7"
+DEFAULT_BG_COLOR = "#121417"
+UI_PANEL_BG = "#171a1f"
+UI_ELEVATED_BG = "#1d2330"
+UI_BORDER_COLOR = "#2a3242"
+UI_MUTED_TEXT = "#9aa4b2"
 
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
@@ -70,8 +76,18 @@ def get_keyword_candidates(language, prefix):
     return [w for w in words if w.startswith(prefix)]
 
 
+def short_display_path(path, max_len=56):
+    if not path:
+        return "Untitled"
+    path = os.path.abspath(path)
+    if len(path) <= max_len:
+        return path
+    keep = max_len - 3
+    return f"...{path[-keep:]}"
+
+
 def resolve_ui_bg(color):
-    return "#1e1e1e" if color in ("black", "#000000") else color
+    return UI_PANEL_BG if color in ("black", "#000000") else color
 
 
 def file_name_from_path(path):
@@ -93,15 +109,13 @@ def update_status_bar(event=None):
 
     insert_idx = editor_tab.text_area.index("insert")
     line, col = insert_idx.split(".")
-    path = editor_tab.file_path or "Untitled"
+    path = short_display_path(editor_tab.file_path)
     room = editor_tab.liveshare_room if editor_tab.liveshare_active else "-"
     modified = "modified" if editor_tab.modified else "saved"
     wrap = "wrap" if word_wrap_enabled else "nowrap"
     elapsed = format_elapsed(time.time() - APP_START_TIME)
-    status_var.set(
-        f"{path} | Ln {line}, Col {int(col) + 1} | {modified} | {wrap} | room: {room}"
-        f" | time in app: {elapsed} | time wasted: {elapsed}"
-    )
+    collaboration = f"room:{room}" if editor_tab.liveshare_active else "solo"
+    status_var.set(f"{path}  |  {line}:{int(col) + 1}  |  {modified}  |  {wrap}  |  {collaboration}  |  wasted: {elapsed}")
 
 
 def refresh_tab_title(editor_tab):
@@ -120,11 +134,11 @@ def apply_text_area_theme(editor_tab):
         bg=bg_color,
         fg=text_color,
         insertbackground=text_color,
-        font=("Courier New", current_font_size),
+        font=editor_font,
         wrap=tk.WORD if word_wrap_enabled else tk.NONE,
     )
-    editor_tab.line_numbers_canvas.config(bg=bg_color)
-    editor_tab.scrollbar.config(troughcolor=bg_color)
+    editor_tab.line_numbers_canvas.config(bg=UI_PANEL_BG)
+    editor_tab.scrollbar.config(bg=UI_PANEL_BG, activebackground=UI_ELEVATED_BG, troughcolor=UI_PANEL_BG)
     editor_tab.update_line_numbers()
 
 
@@ -419,8 +433,8 @@ def load_colors():
         with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
             settings = json.load(file)
         return (
-            settings.get("text_color", "green"),
-            settings.get("bg_color", "black"),
+            settings.get("text_color", DEFAULT_TEXT_COLOR),
+            settings.get("bg_color", DEFAULT_BG_COLOR),
             settings.get("font_size", 12),
             settings.get("project_root"),
             settings.get("recent_files", []),
@@ -428,12 +442,12 @@ def load_colors():
             settings.get("open_tabs", []),
         )
     except (FileNotFoundError, json.JSONDecodeError):
-        return "green", "black", 12, None, [], True, []
+        return DEFAULT_TEXT_COLOR, DEFAULT_BG_COLOR, 12, None, [], True, []
 
 
 def apply_ui_theme():
     ui_bg = resolve_ui_bg(bg_color)
-    root.configure(bg=bg_color)
+    root.configure(bg=ui_bg)
 
     style = ttk.Style(root)
     try:
@@ -443,14 +457,39 @@ def apply_ui_theme():
 
     style.configure(".", background=ui_bg, foreground=text_color)
     style.configure("TFrame", background=ui_bg)
-    style.configure("TLabel", background=ui_bg, foreground=text_color)
-    style.configure("TNotebook", background=ui_bg, borderwidth=0)
-    style.configure("TNotebook.Tab", background=ui_bg, foreground=text_color, padding=(10, 4))
-    style.configure("TEntry", fieldbackground=ui_bg, foreground=text_color)
-    style.configure("TButton", background="#2a2a2a", foreground=text_color)
-    style.configure("Treeview", background=ui_bg, foreground=text_color, fieldbackground=ui_bg)
-    style.configure("Treeview.Heading", background="#2a2a2a", foreground=text_color)
-    style.map("TNotebook.Tab", background=[("selected", "#2a2a2a"), ("active", "#1f1f1f")], foreground=[("selected", text_color), ("active", text_color)])
+    style.configure("TLabel", background=ui_bg, foreground=UI_MUTED_TEXT)
+    style.configure("TNotebook", background=ui_bg, borderwidth=0, tabmargins=(6, 6, 6, 0))
+    style.configure(
+        "TNotebook.Tab",
+        background=UI_PANEL_BG,
+        foreground=UI_MUTED_TEXT,
+        borderwidth=0,
+        padding=(12, 6),
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", UI_ELEVATED_BG), ("active", UI_ELEVATED_BG)],
+        foreground=[("selected", text_color), ("active", text_color)],
+    )
+    style.configure(
+        "TEntry",
+        fieldbackground=UI_ELEVATED_BG,
+        foreground=text_color,
+        insertcolor=text_color,
+        borderwidth=0,
+        relief="flat",
+    )
+    style.configure("TButton", background=UI_ELEVATED_BG, foreground=text_color, borderwidth=0, relief="flat")
+    style.map("TButton", background=[("active", "#263042"), ("pressed", "#202a3a")], foreground=[("active", text_color)])
+    style.configure("Treeview", background=UI_PANEL_BG, foreground=text_color, fieldbackground=UI_PANEL_BG, rowheight=22, borderwidth=0)
+    style.configure("Treeview.Heading", background=UI_ELEVATED_BG, foreground=UI_MUTED_TEXT, relief="flat", borderwidth=0)
+    style.map("Treeview", background=[("selected", "#263042")], foreground=[("selected", text_color)])
+    root.option_add("*Menu.Background", UI_PANEL_BG)
+    root.option_add("*Menu.Foreground", text_color)
+    root.option_add("*Menu.ActiveBackground", UI_ELEVATED_BG)
+    root.option_add("*Menu.ActiveForeground", text_color)
+    file_tree.tag_configure("dir", foreground=UI_MUTED_TEXT)
+    file_tree.tag_configure("file", foreground=text_color)
 
 
 def save_settings():
@@ -516,10 +555,10 @@ class EditorTab:
         self.syntax_timer = None
         self.completion_popup = None
 
-        editor_frame = tk.Frame(self.frame, bg=bg_color_value)
+        editor_frame = tk.Frame(self.frame, bg=UI_BG)
         editor_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.line_numbers_canvas = tk.Canvas(editor_frame, width=54, bg=bg_color_value, bd=0, highlightthickness=0)
+        self.line_numbers_canvas = tk.Canvas(editor_frame, width=50, bg=UI_PANEL_BG, bd=0, highlightthickness=0)
         self.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y)
 
         self.text_area = tk.Text(
@@ -527,21 +566,26 @@ class EditorTab:
             wrap=tk.WORD,
             width=80,
             height=20,
-            font=("Courier New", font_size_value),
+            font=editor_font,
             bg=bg_color_value,
             fg=text_color_value,
             insertbackground=text_color_value,
             undo=True,
+            bd=0,
+            relief=tk.FLAT,
+            padx=10,
+            pady=10,
         )
         self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.scrollbar = tk.Scrollbar(
             editor_frame,
             command=self.on_scroll,
-            bg="#2a2a2a",
-            activebackground="#3a3a3a",
-            troughcolor=bg_color_value,
+            bg=UI_PANEL_BG,
+            activebackground=UI_ELEVATED_BG,
+            troughcolor=UI_PANEL_BG,
             highlightthickness=0,
+            bd=0,
         )
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -746,28 +790,46 @@ tabs = {}
 next_tab_id = 1
 open_recent_menu = None
 wrap_var = tk.BooleanVar(value=word_wrap_enabled)
+ui_font = ("Segoe UI", 10)
+code_font = ("JetBrains Mono", current_font_size)
 
-main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=option_bg, sashwidth=5)
+main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=UI_BG, sashwidth=4, sashrelief=tk.FLAT)
 main_pane.pack(fill=tk.BOTH, expand=True)
 
-left_sidebar = tk.Frame(main_pane, bg=option_bg, width=240)
+left_sidebar = tk.Frame(main_pane, bg=UI_PANEL_BG, width=240, padx=10, pady=10)
 main_pane.add(left_sidebar, minsize=180)
 
-right_panel = tk.Frame(main_pane, bg=bg_color)
+right_panel = tk.Frame(main_pane, bg=UI_BG, padx=8, pady=8)
 main_pane.add(right_panel, stretch="always")
 
-project_header = tk.Label(left_sidebar, textvariable=project_label_var, bg=option_bg, fg=text_color, anchor="w")
-project_header.pack(fill=tk.X, padx=6, pady=(6, 2))
+project_header = tk.Label(
+    left_sidebar,
+    textvariable=project_label_var,
+    bg=UI_PANEL_BG,
+    fg=UI_MUTED_TEXT,
+    anchor="w",
+    font=ui_font,
+)
+project_header.pack(fill=tk.X, padx=2, pady=(0, 8))
 
 file_tree = ttk.Treeview(left_sidebar, columns=("path",), show="tree")
-file_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+file_tree.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 file_tree.bind("<<TreeviewOpen>>", on_tree_open)
 file_tree.bind("<Double-1>", on_tree_double_click)
 
 notebook = ttk.Notebook(right_panel)
 notebook.pack(fill=tk.BOTH, expand=True)
 
-status_bar = tk.Label(root, textvariable=status_var, bg="#2a2a2a", fg=text_color, anchor="w")
+status_bar = tk.Label(
+    root,
+    textvariable=status_var,
+    bg=UI_PANEL_BG,
+    fg=UI_MUTED_TEXT,
+    anchor="w",
+    padx=10,
+    pady=6,
+    font=ui_font,
+)
 status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
 apply_ui_theme()
@@ -1368,4 +1430,13 @@ rebuild_recent_files_menu()
 autosave()
 update_status_bar()
 update_status_timer()
+
+# Start in a balanced clean layout.
+root.update_idletasks()
+try:
+    total_width = max(root.winfo_width(), 980)
+    main_pane.sash_place(0, int(total_width * 0.24), 0)
+except tk.TclError:
+    pass
+
 root.mainloop()
