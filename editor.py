@@ -1,13 +1,96 @@
 import json
+import keyword
 import os
+import re
 import socket
 import threading
+import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
+MAX_RECENT_FILES = 10
+SETTINGS_FILE = "settings.json"
+APP_START_TIME = time.time()
+DEFAULT_TEXT_COLOR = "#d7dde7"
+DEFAULT_BG_COLOR = "#121417"
+UI_BG = "#111318"
+UI_PANEL_BG = "#171a1f"
+UI_ELEVATED_BG = "#1d2330"
+UI_BORDER_COLOR = "#2a3242"
+UI_MUTED_TEXT = "#9aa4b2"
+DEFAULT_SHOW_SIDEBAR = False
+DEFAULT_SHOW_LINE_NUMBERS = False
+
+LANGUAGE_EXTENSIONS = {
+    ".py": "python",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "javascript",
+    ".tsx": "javascript",
+    ".json": "json",
+    ".md": "markdown",
+    ".markdown": "markdown",
+}
+
+LANGUAGE_KEYWORDS = {
+    "python": sorted(set(keyword.kwlist)),
+    "javascript": [
+        "break", "case", "catch", "class", "const", "continue", "debugger", "default", "delete",
+        "do", "else", "export", "extends", "false", "finally", "for", "function", "if", "import",
+        "in", "instanceof", "let", "new", "null", "return", "super", "switch", "this", "throw",
+        "true", "try", "typeof", "var", "void", "while", "with", "yield",
+    ],
+    "json": ["true", "false", "null"],
+    "markdown": ["#", "##", "###", "- ", "* ", "1. ", "```"],
+}
+
+PAIR_CHARS = {
+    "(": ")",
+    "[": "]",
+    "{": "}",
+    "\"": "\"",
+    "'": "'",
+}
+
+
+def format_elapsed(seconds):
+    total = int(max(0, seconds))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def get_language_for_path(file_path):
+    if not file_path:
+        return "plaintext"
+    _, ext = os.path.splitext(file_path.lower())
+    return LANGUAGE_EXTENSIONS.get(ext, "plaintext")
+
+
+def to_index(char_pos):
+    return f"1.0+{char_pos}c"
+
+
+def get_keyword_candidates(language, prefix):
+    if not prefix:
+        return []
+    words = LANGUAGE_KEYWORDS.get(language, [])
+    return [w for w in words if w.startswith(prefix)]
+
+
+def short_display_path(path, max_len=56):
+    if not path:
+        return "Untitled"
+    path = os.path.abspath(path)
+    if len(path) <= max_len:
+        return path
+    keep = max_len - 3
+    return f"...{path[-keep:]}"
+
 
 def resolve_ui_bg(color):
-    return "#1e1e1e" if color in ("black", "#000000") else color
+    return UI_PANEL_BG if color in ("black", "#000000") else color
 
 
 def file_name_from_path(path):
@@ -29,10 +112,13 @@ def update_status_bar(event=None):
 
     insert_idx = editor_tab.text_area.index("insert")
     line, col = insert_idx.split(".")
-    path = editor_tab.file_path or "Untitled"
-    room = editor_tab.liveshare_room if editor_tab.liveshare_active else "-"
-    modified = "modified" if editor_tab.modified else "saved"
-    status_var.set(f"{path} | Ln {line}, Col {int(col) + 1} | {modified} | room: {room}")
+    path = short_display_path(editor_tab.file_path)
+    modified_mark = "*" if editor_tab.modified else ""
+    elapsed = format_elapsed(time.time() - APP_START_TIME)
+    parts = [path, f"{line}:{int(col) + 1}{modified_mark}", elapsed]
+    if editor_tab.liveshare_active and editor_tab.liveshare_room:
+        parts.append(f"live:{editor_tab.liveshare_room}")
+    status_var.set("  ".join(parts))
 
 
 def refresh_tab_title(editor_tab):
@@ -41,6 +127,8 @@ def refresh_tab_title(editor_tab):
     except tk.TclError:
         return
     notebook.tab(idx, text=safe_tab_title(editor_tab))
+    editor_tab.language = get_language_for_path(editor_tab.file_path)
+    editor_tab.run_highlight()
     update_status_bar()
 
 
@@ -49,11 +137,76 @@ def apply_text_area_theme(editor_tab):
         bg=bg_color,
         fg=text_color,
         insertbackground=text_color,
-        font=("Courier New", current_font_size),
+        font=("Consolas", current_font_size),
+        wrap=tk.WORD if word_wrap_enabled else tk.NONE,
     )
-    editor_tab.line_numbers_canvas.config(bg=bg_color)
-    editor_tab.scrollbar.config(troughcolor=bg_color)
+    if line_numbers_enabled:
+        editor_tab.line_numbers_canvas.config(bg=UI_PANEL_BG, width=46)
+        if not editor_tab.line_numbers_canvas.winfo_ismapped():
+            editor_tab.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y, before=editor_tab.text_area)
+    else:
+        if editor_tab.line_numbers_canvas.winfo_ismapped():
+            editor_tab.line_numbers_canvas.pack_forget()
+    editor_tab.scrollbar.config(bg=UI_PANEL_BG, activebackground=UI_ELEVATED_BG, troughcolor=UI_PANEL_BG)
     editor_tab.update_line_numbers()
+
+
+def add_recent_file(file_path):
+    global recent_files
+    if not file_path:
+        return
+    abs_path = os.path.abspath(file_path)
+    recent_files = [p for p in recent_files if p != abs_path]
+    recent_files.insert(0, abs_path)
+    recent_files = recent_files[:MAX_RECENT_FILES]
+    rebuild_recent_files_menu()
+
+
+def rebuild_recent_files_menu():
+    if open_recent_menu is None:
+        return
+    open_recent_menu.delete(0, tk.END)
+    if not recent_files:
+        open_recent_menu.add_command(label="(empty)", state=tk.DISABLED)
+        return
+    for path in recent_files:
+        open_recent_menu.add_command(label=path, command=lambda p=path: open_recent_file(p))
+
+
+def open_recent_file(path):
+    global recent_files
+    if not os.path.exists(path):
+        messagebox.showwarning("Open Recent", f"File not found:\n{path}")
+        if path in recent_files:
+            recent_files.remove(path)
+            rebuild_recent_files_menu()
+            save_settings()
+        return
+    open_file_in_new_tab(path)
+
+
+def restore_session_tabs():
+    restored = 0
+    for path in session_open_tabs:
+        if path and os.path.isfile(path):
+            if open_file_in_new_tab(path):
+                restored += 1
+    return restored
+
+
+def update_status_timer():
+    update_status_bar()
+    root.after(1000, update_status_timer)
+
+
+def set_project_root(selected_dir):
+    global project_root
+    project_root = selected_dir
+    project_label_var.set(f"Project: {project_root}")
+    for item in file_tree.get_children():
+        file_tree.delete(item)
+    root_item = file_tree.insert("", "end", text=os.path.basename(project_root) or project_root, open=True, values=(project_root,))
+    populate_tree_node(root_item, project_root)
 
 
 def populate_tree_node(parent_item, abs_dir):
@@ -100,6 +253,7 @@ def open_file_in_new_tab(file_path):
     editor_tab.file_path = file_path
     editor_tab.modified = False
     editor_tab.update_line_numbers()
+    add_recent_file(file_path)
     refresh_tab_title(editor_tab)
     return editor_tab
 
@@ -117,17 +271,11 @@ def on_tree_double_click(event=None):
 
 
 def open_project_folder(event=None):
-    global project_root
     selected_dir = filedialog.askdirectory()
     if not selected_dir:
         return
-
-    project_root = selected_dir
-    project_label_var.set(f"Project: {project_root}")
-    for item in file_tree.get_children():
-        file_tree.delete(item)
-    root_item = file_tree.insert("", "end", text=os.path.basename(project_root) or project_root, open=True, values=(project_root,))
-    populate_tree_node(root_item, project_root)
+    set_project_root(selected_dir)
+    save_settings()
 
 
 def start_liveshare_with_custom_server(editor_tab):
@@ -291,20 +439,24 @@ def autosave():
 
 def load_colors():
     try:
-        with open("settings.json", "r") as file:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
             settings = json.load(file)
         return (
-            settings.get("text_color", "green"),
-            settings.get("bg_color", "black"),
+            settings.get("text_color", DEFAULT_TEXT_COLOR),
+            settings.get("bg_color", DEFAULT_BG_COLOR),
             settings.get("font_size", 12),
+            settings.get("project_root"),
+            settings.get("recent_files", []),
+            settings.get("word_wrap", True),
+            settings.get("open_tabs", []),
         )
     except (FileNotFoundError, json.JSONDecodeError):
-        return "green", "black", 12
+        return DEFAULT_TEXT_COLOR, DEFAULT_BG_COLOR, 12, None, [], True, []
 
 
 def apply_ui_theme():
     ui_bg = resolve_ui_bg(bg_color)
-    root.configure(bg=bg_color)
+    root.configure(bg=ui_bg)
 
     style = ttk.Style(root)
     try:
@@ -314,24 +466,82 @@ def apply_ui_theme():
 
     style.configure(".", background=ui_bg, foreground=text_color)
     style.configure("TFrame", background=ui_bg)
-    style.configure("TLabel", background=ui_bg, foreground=text_color)
-    style.configure("TNotebook", background=ui_bg, borderwidth=0)
-    style.configure("TNotebook.Tab", background=ui_bg, foreground=text_color, padding=(10, 4))
-    style.configure("TEntry", fieldbackground=ui_bg, foreground=text_color)
-    style.configure("TButton", background="#2a2a2a", foreground=text_color)
-    style.configure("Treeview", background=ui_bg, foreground=text_color, fieldbackground=ui_bg)
-    style.configure("Treeview.Heading", background="#2a2a2a", foreground=text_color)
-    style.map("TNotebook.Tab", background=[("selected", "#2a2a2a"), ("active", "#1f1f1f")], foreground=[("selected", text_color), ("active", text_color)])
+    style.configure("TLabel", background=ui_bg, foreground=UI_MUTED_TEXT)
+    style.configure("TNotebook", background=ui_bg, borderwidth=0, tabmargins=(2, 2, 2, 0))
+    style.configure(
+        "TNotebook.Tab",
+        background=UI_PANEL_BG,
+        foreground=UI_MUTED_TEXT,
+        borderwidth=0,
+        padding=(10, 4),
+    )
+    style.map("TNotebook.Tab", background=[("selected", UI_ELEVATED_BG)], foreground=[("selected", text_color)])
+    style.configure(
+        "TEntry",
+        fieldbackground=UI_ELEVATED_BG,
+        foreground=text_color,
+        insertcolor=text_color,
+        borderwidth=0,
+        relief="flat",
+    )
+    style.configure("TButton", background=UI_ELEVATED_BG, foreground=text_color, borderwidth=0, relief="flat")
+    style.map("TButton", background=[("active", UI_ELEVATED_BG), ("pressed", UI_ELEVATED_BG)], foreground=[("active", text_color)])
+    style.configure("Treeview", background=UI_PANEL_BG, foreground=text_color, fieldbackground=UI_PANEL_BG, rowheight=20, borderwidth=0)
+    style.configure("Treeview.Heading", background=UI_ELEVATED_BG, foreground=UI_MUTED_TEXT, relief="flat", borderwidth=0)
+    style.map("Treeview", background=[("selected", UI_ELEVATED_BG)], foreground=[("selected", text_color)])
+    root.option_add("*Menu.Background", UI_PANEL_BG)
+    root.option_add("*Menu.Foreground", text_color)
+    root.option_add("*Menu.ActiveBackground", UI_ELEVATED_BG)
+    root.option_add("*Menu.ActiveForeground", text_color)
+    file_tree.tag_configure("dir", foreground=UI_MUTED_TEXT)
+    file_tree.tag_configure("file", foreground=text_color)
+
+
+def save_settings():
+    settings = {
+        "text_color": text_color,
+        "bg_color": bg_color,
+        "font_size": current_font_size,
+        "project_root": project_root,
+        "recent_files": recent_files,
+        "word_wrap": word_wrap_enabled,
+        "open_tabs": [tab.file_path for tab in tabs.values() if tab.file_path],
+    }
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
+        json.dump(settings, file)
 
 
 def save_colors(text_color_value, bg_color_value, font_size_value):
-    settings = {
-        "text_color": text_color_value,
-        "bg_color": bg_color_value,
-        "font_size": font_size_value,
-    }
-    with open("settings.json", "w") as file:
-        json.dump(settings, file)
+    global text_color, bg_color, current_font_size
+    text_color = text_color_value
+    bg_color = bg_color_value
+    current_font_size = font_size_value
+    save_settings()
+
+
+def save_current_tab(editor_tab, force_choose_path=False):
+    if not editor_tab:
+        return False
+    try:
+        if force_choose_path or not editor_tab.file_path:
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("All Files", "*.*"), ("Text files", "*.txt")],
+            )
+            if not file_path:
+                return False
+            editor_tab.file_path = file_path
+
+        with open(editor_tab.file_path, "w", encoding="utf-8") as file:
+            file.write(editor_tab.text_area.get("1.0", "end-1c"))
+
+        editor_tab.modified = False
+        add_recent_file(editor_tab.file_path)
+        refresh_tab_title(editor_tab)
+        return True
+    except Exception as e:
+        messagebox.showerror("Error", f"Gabim gjate ruajtjes se skedarit: {e}")
+        return False
 
 
 class EditorTab:
@@ -346,33 +556,41 @@ class EditorTab:
         self.liveshare_active = False
         self.liveshare_handler_id = None
         self.liveshare_room = None
+        self.language = "plaintext"
+        self.syntax_timer = None
+        self.completion_popup = None
 
-        editor_frame = tk.Frame(self.frame, bg=bg_color_value)
+        editor_frame = tk.Frame(self.frame, bg=UI_BG)
         editor_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.line_numbers_canvas = tk.Canvas(editor_frame, width=54, bg=bg_color_value, bd=0, highlightthickness=0)
-        self.line_numbers_canvas.pack(side=tk.LEFT, fill=tk.Y)
+        self.line_numbers_canvas = tk.Canvas(editor_frame, width=44, bg=UI_BG, bd=0, highlightthickness=0)
+        self.line_numbers_canvas.pack_forget()
 
         self.text_area = tk.Text(
             editor_frame,
             wrap=tk.WORD,
             width=80,
             height=20,
-            font=("Courier New", font_size_value),
+            font=editor_font,
             bg=bg_color_value,
             fg=text_color_value,
             insertbackground=text_color_value,
             undo=True,
+            bd=0,
+            relief=tk.FLAT,
+            padx=10,
+            pady=10,
         )
         self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.scrollbar = tk.Scrollbar(
             editor_frame,
             command=self.on_scroll,
-            bg="#2a2a2a",
-            activebackground="#3a3a3a",
-            troughcolor=bg_color_value,
+            bg=UI_PANEL_BG,
+            activebackground=UI_ELEVATED_BG,
+            troughcolor=UI_PANEL_BG,
             highlightthickness=0,
+            bd=0,
         )
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
@@ -384,6 +602,10 @@ class EditorTab:
         self.text_area.bind("<<Modified>>", self.on_text_modified)
         self.text_area.bind("<KeyRelease>", update_status_bar, add="+")
         self.text_area.bind("<ButtonRelease-1>", update_status_bar, add="+")
+        self.text_area.bind("<KeyPress>", self.on_text_key_press, add="+")
+        self.text_area.bind("<KeyRelease>", self.on_text_key_release, add="+")
+        self.setup_syntax_tags()
+        self.run_highlight()
 
     def on_scroll(self, *args):
         self.text_area.yview(*args)
@@ -413,11 +635,138 @@ class EditorTab:
             refresh_tab_title(self)
             self.text_area.edit_modified(False)
 
+    def setup_syntax_tags(self):
+        self.text_area.tag_configure("syn_keyword", foreground="#c586c0")
+        self.text_area.tag_configure("syn_string", foreground="#ce9178")
+        self.text_area.tag_configure("syn_comment", foreground="#6a9955")
+        self.text_area.tag_configure("syn_number", foreground="#b5cea8")
+        self.text_area.tag_configure("syn_heading", foreground="#4fc1ff")
+
+    def clear_syntax_tags(self):
+        for tag in ("syn_keyword", "syn_string", "syn_comment", "syn_number", "syn_heading"):
+            self.text_area.tag_remove(tag, "1.0", "end")
+
+    def run_highlight(self):
+        if self.syntax_timer:
+            self.text_area.after_cancel(self.syntax_timer)
+        self.syntax_timer = self.text_area.after(120, self.apply_syntax_highlighting)
+
+    def apply_syntax_highlighting(self):
+        self.clear_syntax_tags()
+        content = self.text_area.get("1.0", "end-1c")
+        if not content:
+            return
+
+        if self.language == "markdown":
+            for match in re.finditer(r"(?m)^#{1,6} .*$", content):
+                self._tag_span("syn_heading", match.start(), match.end())
+            return
+
+        comment_patterns = {
+            "python": r"(?m)#.*$",
+            "javascript": r"(?m)//.*$",
+            "json": None,
+        }
+        pattern = comment_patterns.get(self.language)
+        if pattern:
+            for match in re.finditer(pattern, content):
+                self._tag_span("syn_comment", match.start(), match.end())
+
+        string_pattern = r"(?s)(\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*')"
+        for match in re.finditer(string_pattern, content):
+            self._tag_span("syn_string", match.start(), match.end())
+
+        for match in re.finditer(r"(?<!\w)\d+(?:\.\d+)?(?!\w)", content):
+            self._tag_span("syn_number", match.start(), match.end())
+
+        for kw in LANGUAGE_KEYWORDS.get(self.language, []):
+            for match in re.finditer(rf"(?<!\w){re.escape(kw)}(?!\w)", content):
+                self._tag_span("syn_keyword", match.start(), match.end())
+
+    def _tag_span(self, tag, start_off, end_off):
+        start = f"1.0+{start_off}c"
+        end = f"1.0+{end_off}c"
+        self.text_area.tag_add(tag, start, end)
+
+    def _insert_paired(self, left, right):
+        widget = self.text_area
+        if widget.tag_ranges(tk.SEL):
+            start = widget.index(tk.SEL_FIRST)
+            end = widget.index(tk.SEL_LAST)
+            selection = widget.get(start, end)
+            widget.delete(start, end)
+            widget.insert(start, left + selection + right)
+            widget.mark_set("insert", f"{start}+{len(left + selection + right)}c")
+            return "break"
+        widget.insert("insert", left + right)
+        widget.mark_set("insert", "insert-1c")
+        return "break"
+
+    def _autocomplete_current_word(self):
+        word = self.text_area.get("insert wordstart", "insert")
+        if not word or len(word) < 2:
+            if self.completion_popup:
+                self.completion_popup.destroy()
+                self.completion_popup = None
+            return
+        candidates = [kw for kw in LANGUAGE_KEYWORDS.get(self.language, []) if kw.startswith(word) and kw != word]
+        if not candidates:
+            if self.completion_popup:
+                self.completion_popup.destroy()
+                self.completion_popup = None
+            return
+        candidates = candidates[:8]
+
+        if self.completion_popup:
+            self.completion_popup.destroy()
+        self.completion_popup = tk.Toplevel(self.text_area)
+        self.completion_popup.overrideredirect(True)
+        self.completion_popup.configure(bg=resolve_ui_bg(bg_color))
+        x, y, _, h = self.text_area.bbox("insert") or (0, 0, 0, 0)
+        abs_x = self.text_area.winfo_rootx() + x
+        abs_y = self.text_area.winfo_rooty() + y + h
+        self.completion_popup.geometry(f"+{abs_x}+{abs_y}")
+
+        lb = tk.Listbox(self.completion_popup, height=min(len(candidates), 6), bg=resolve_ui_bg(bg_color), fg=text_color)
+        for c in candidates:
+            lb.insert(tk.END, c)
+        lb.pack()
+        lb.selection_set(0)
+
+        def accept(event=None):
+            if not lb.curselection():
+                return "break"
+            choice = lb.get(lb.curselection()[0])
+            self.text_area.delete("insert wordstart", "insert")
+            self.text_area.insert("insert", choice)
+            self.completion_popup.destroy()
+            self.completion_popup = None
+            self.run_highlight()
+            return "break"
+
+        lb.bind("<Return>", accept)
+        lb.bind("<Double-Button-1>", accept)
+        lb.focus_set()
+
+    def on_text_key_press(self, event):
+        pairs = {"(": ")", "[": "]", "{": "}", '"': '"', "'": "'"}
+        if event.char in pairs:
+            return self._insert_paired(event.char, pairs[event.char])
+        if event.keysym == "Tab":
+            self.text_area.insert("insert", "    ")
+            return "break"
+        return None
+
+    def on_text_key_release(self, event=None):
+        self.run_highlight()
+        if event is not None and event.keysym.isalpha():
+            self._autocomplete_current_word()
+
 
 root = tk.Tk()
 root.title("Nullsec8 Editor")
 
-text_color, bg_color, current_font_size = load_colors()
+text_color, bg_color, current_font_size, settings_project_root, settings_recent_files, settings_word_wrap, settings_open_tabs = load_colors()
 option_bg = resolve_ui_bg(bg_color)
 root.config(bg=bg_color)
 root.option_add("*Background", option_bg)
@@ -430,39 +779,64 @@ root.option_add("*Text.Foreground", text_color)
 root.option_add("*Text.InsertBackground", text_color)
 root.option_add("*Menu.Background", option_bg)
 root.option_add("*Menu.Foreground", text_color)
-root.option_add("*Menu.ActiveBackground", "#2a2a2a")
+root.option_add("*Menu.ActiveBackground", UI_ELEVATED_BG)
 root.option_add("*Menu.ActiveForeground", text_color)
-root.option_add("*Button.Background", "#2a2a2a")
+root.option_add("*Button.Background", UI_ELEVATED_BG)
 root.option_add("*Button.Foreground", text_color)
 root.option_add("*Toplevel.Background", option_bg)
 
-project_root = None
+project_root = settings_project_root
+recent_files = settings_recent_files[:MAX_RECENT_FILES] if isinstance(settings_recent_files, list) else []
+word_wrap_enabled = bool(settings_word_wrap)
+session_open_tabs = settings_open_tabs if isinstance(settings_open_tabs, list) else []
 status_var = tk.StringVar(value="Ready")
 project_label_var = tk.StringVar(value="Project: (none)")
 tabs = {}
 next_tab_id = 1
+open_recent_menu = None
+wrap_var = tk.BooleanVar(value=word_wrap_enabled)
+line_numbers_enabled = DEFAULT_SHOW_LINE_NUMBERS
+sidebar_visible = DEFAULT_SHOW_SIDEBAR
+ui_font = ("Segoe UI", 10)
 
-main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=option_bg, sashwidth=5)
+main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=UI_BG, sashwidth=3, sashrelief=tk.FLAT)
 main_pane.pack(fill=tk.BOTH, expand=True)
 
-left_sidebar = tk.Frame(main_pane, bg=option_bg, width=240)
-main_pane.add(left_sidebar, minsize=180)
+left_sidebar = tk.Frame(main_pane, bg=UI_PANEL_BG, width=220, padx=8, pady=8)
+if DEFAULT_SHOW_SIDEBAR:
+    main_pane.add(left_sidebar, minsize=150)
 
-right_panel = tk.Frame(main_pane, bg=bg_color)
+right_panel = tk.Frame(main_pane, bg=UI_BG, padx=4, pady=4)
 main_pane.add(right_panel, stretch="always")
 
-project_header = tk.Label(left_sidebar, textvariable=project_label_var, bg=option_bg, fg=text_color, anchor="w")
-project_header.pack(fill=tk.X, padx=6, pady=(6, 2))
+project_header = tk.Label(
+    left_sidebar,
+    textvariable=project_label_var,
+    bg=UI_PANEL_BG,
+    fg=UI_MUTED_TEXT,
+    anchor="w",
+    font=ui_font,
+)
+project_header.pack(fill=tk.X, padx=2, pady=(0, 8))
 
 file_tree = ttk.Treeview(left_sidebar, columns=("path",), show="tree")
-file_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+file_tree.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
 file_tree.bind("<<TreeviewOpen>>", on_tree_open)
 file_tree.bind("<Double-1>", on_tree_double_click)
 
 notebook = ttk.Notebook(right_panel)
 notebook.pack(fill=tk.BOTH, expand=True)
 
-status_bar = tk.Label(root, textvariable=status_var, bg="#2a2a2a", fg=text_color, anchor="w")
+status_bar = tk.Label(
+    root,
+    textvariable=status_var,
+    bg=UI_PANEL_BG,
+    fg=UI_MUTED_TEXT,
+    anchor="w",
+    padx=10,
+    pady=6,
+    font=ui_font,
+)
 status_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
 apply_ui_theme()
@@ -716,6 +1090,69 @@ def show_find_replace(event=None):
     tk.Button(button_row, text="Replace All", command=do_replace_all, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
 
 
+def go_to_line(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        return
+    line_raw = simple_text_prompt("Go to Line", "Line number:")
+    if not line_raw:
+        return
+    try:
+        line_num = int(line_raw)
+        if line_num <= 0:
+            raise ValueError
+    except ValueError:
+        messagebox.showerror("Go to Line", "Please enter a valid positive number.")
+        return
+
+    last_line = int(editor_tab.text_area.index("end-1c").split(".")[0])
+    line_num = min(line_num, last_line)
+    idx = f"{line_num}.0"
+    editor_tab.text_area.mark_set("insert", idx)
+    editor_tab.text_area.see(idx)
+    editor_tab.text_area.focus_set()
+    update_status_bar()
+
+
+def toggle_word_wrap(event=None):
+    global word_wrap_enabled
+    word_wrap_enabled = wrap_var.get()
+    for tab in tabs.values():
+        apply_text_area_theme(tab)
+    update_status_bar()
+    save_settings()
+
+
+def toggle_sidebar(event=None):
+    global sidebar_visible
+    if sidebar_visible:
+        main_pane.forget(left_sidebar)
+        sidebar_visible = False
+    else:
+        main_pane.add(left_sidebar, before=right_panel, minsize=150)
+        sidebar_visible = True
+    update_status_bar()
+    return "break"
+
+
+def toggle_line_numbers(event=None):
+    global line_numbers_enabled
+    line_numbers_enabled = not line_numbers_enabled
+    for tab in tabs.values():
+        apply_text_area_theme(tab)
+    update_status_bar()
+    return "break"
+
+
+def disconnect_liveshare(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        return
+    if editor_tab.liveshare_active:
+        stop_liveshare(editor_tab)
+        messagebox.showinfo("LiveShare", "Disconnected.")
+
+
 def zoom_in(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
@@ -769,6 +1206,31 @@ def close_tab(event=None):
     update_status_bar()
 
 
+def close_tab_by_obj(current_tab):
+    if current_tab is None:
+        return True
+
+    stop_liveshare(current_tab)
+    if current_tab.modified:
+        result = messagebox.askyesnocancel("Save Changes", "Do you want to save changes before closing?")
+        if result is None:
+            return False
+        if result and not save_current_tab(current_tab, force_choose_path=False):
+            return False
+
+    try:
+        notebook.forget(current_tab.frame)
+    except tk.TclError:
+        pass
+
+    for tab_id, editor_tab in list(tabs.items()):
+        if editor_tab is current_tab:
+            del tabs[tab_id]
+            break
+    update_status_bar()
+    return True
+
+
 def undo(event=None):
     editor_tab = get_current_tab()
     if editor_tab:
@@ -789,6 +1251,132 @@ def redo(event=None):
     update_status_bar()
 
 
+def check_unsaved_tabs():
+    unsaved = [tab for tab in tabs.values() if tab.modified]
+    if not unsaved:
+        return True
+
+    answer = messagebox.askyesnocancel(
+        "Unsaved Changes",
+        "You have unsaved tabs. Save all before exit?",
+    )
+    if answer is None:
+        return False
+    if answer:
+        for tab in list(unsaved):
+            if not save_current_tab(tab, force_choose_path=False):
+                return False
+    return True
+
+
+def on_app_exit(event=None):
+    if not check_unsaved_tabs():
+        return "break"
+
+    for tab in list(tabs.values()):
+        stop_liveshare(tab)
+    save_settings()
+    root.destroy()
+    return "break"
+
+
+def search_in_project_worker(query, use_regex):
+    if not project_root or not os.path.isdir(project_root):
+        return []
+    results = []
+    for current_root, _, files in os.walk(project_root):
+        for filename in files:
+            path = os.path.join(current_root, filename)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line_no, line in enumerate(f, start=1):
+                        if use_regex:
+                            if re.search(query, line):
+                                results.append((path, line_no, line.rstrip()))
+                        else:
+                            if query.lower() in line.lower():
+                                results.append((path, line_no, line.rstrip()))
+            except Exception:
+                continue
+    return results
+
+
+def open_search_result(tree):
+    selected = tree.focus()
+    if not selected:
+        return
+    vals = tree.item(selected, "values")
+    if len(vals) < 2:
+        return
+    path = vals[0]
+    try:
+        line_no = int(vals[1])
+    except ValueError:
+        return
+    tab = open_file_in_new_tab(path)
+    if not tab:
+        return
+    idx = f"{line_no}.0"
+    tab.text_area.mark_set("insert", idx)
+    tab.text_area.see(idx)
+    tab.text_area.focus_set()
+    update_status_bar()
+
+
+def find_in_project(event=None):
+    if not project_root or not os.path.isdir(project_root):
+        messagebox.showinfo("Find in Project", "Open a project folder first.")
+        return
+
+    win = tk.Toplevel(root)
+    win.title("Find in Project")
+    win.configure(bg=option_bg)
+    win.transient(root)
+    win.geometry("900x450")
+
+    top = tk.Frame(win, bg=option_bg)
+    top.pack(fill=tk.X, padx=8, pady=8)
+    tk.Label(top, text="Query:", bg=option_bg, fg=text_color).pack(side=tk.LEFT, padx=(0, 6))
+    query_var = tk.StringVar()
+    query_entry = tk.Entry(top, textvariable=query_var, width=40, bg=option_bg, fg=text_color, insertbackground=text_color)
+    query_entry.pack(side=tk.LEFT, padx=(0, 8))
+    query_entry.focus_set()
+    regex_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(top, text="Regex", variable=regex_var, bg=option_bg, fg=text_color, selectcolor="#2a2a2a").pack(side=tk.LEFT)
+
+    columns = ("path", "line", "text")
+    tree = ttk.Treeview(win, columns=columns, show="headings")
+    tree.heading("path", text="File")
+    tree.heading("line", text="Line")
+    tree.heading("text", text="Text")
+    tree.column("path", width=320, anchor="w")
+    tree.column("line", width=70, anchor="center")
+    tree.column("text", width=480, anchor="w")
+    tree.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+    status = tk.Label(win, text="Ready", bg=option_bg, fg=text_color, anchor="w")
+    status.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+    def run_search():
+        query = query_var.get().strip()
+        if not query:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        try:
+            matches = search_in_project_worker(query, regex_var.get())
+        except re.error as exc:
+            messagebox.showerror("Find in Project", f"Invalid regex: {exc}")
+            return
+        for path, line_no, text in matches:
+            tree.insert("", "end", values=(path, line_no, text))
+        status.config(text=f"Found {len(matches)} matches")
+
+    tk.Button(top, text="Search", command=run_search, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=8)
+    query_entry.bind("<Return>", lambda e: run_search())
+    tree.bind("<Double-1>", lambda e: open_search_result(tree))
+
+
 menu = tk.Menu(root, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 root.config(menu=menu)
 
@@ -797,14 +1385,17 @@ menu.add_cascade(label="File", menu=file_menu)
 file_menu.add_command(label="New", command=new_file, accelerator="Ctrl+N")
 file_menu.add_command(label="Open", command=hap_skedar, accelerator="Ctrl+O")
 file_menu.add_command(label="Open Folder", command=open_project_folder, accelerator="Ctrl+Shift+O")
+open_recent_menu = tk.Menu(file_menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
+file_menu.add_cascade(label="Open Recent", menu=open_recent_menu)
 file_menu.add_command(label="Save", command=ruaj_skedar, accelerator="Ctrl+S")
 file_menu.add_command(label="Save As", command=ruaj_si_skedar, accelerator="Ctrl+Shift+S")
 file_menu.add_separator()
 file_menu.add_command(label="Close Tab", command=close_tab, accelerator="Ctrl+W")
 file_menu.add_separator()
-file_menu.add_command(label="Exit", command=root.quit, accelerator="Ctrl+Q")
+file_menu.add_command(label="Exit", command=on_app_exit, accelerator="Ctrl+Q")
 file_menu.add_separator()
 file_menu.add_command(label="Start LiveShare", command=lambda: start_liveshare_with_custom_server(get_current_tab()))
+file_menu.add_command(label="Disconnect LiveShare", command=disconnect_liveshare, accelerator="Ctrl+Shift+L")
 
 edit_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Edit", menu=edit_menu)
@@ -816,11 +1407,19 @@ edit_menu.add_command(label="Redo", command=redo, accelerator="Ctrl+Y")
 edit_menu.add_separator()
 edit_menu.add_command(label="Find", command=find_text, accelerator="Ctrl+F")
 edit_menu.add_command(label="Find / Replace", command=show_find_replace, accelerator="Ctrl+H")
+edit_menu.add_command(label="Go to Line", command=go_to_line, accelerator="Ctrl+L")
+
+search_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
+menu.add_cascade(label="Search", menu=search_menu)
+search_menu.add_command(label="Find in Project", command=find_in_project, accelerator="Ctrl+Shift+F")
 
 view_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="View", menu=view_menu)
 view_menu.add_command(label="Zoom In", command=zoom_in, accelerator="Ctrl++")
 view_menu.add_command(label="Zoom Out", command=zoom_out, accelerator="Ctrl+-")
+view_menu.add_checkbutton(label="Word Wrap", variable=wrap_var, command=toggle_word_wrap, accelerator="Ctrl+Shift+W")
+view_menu.add_command(label="Toggle Sidebar", command=toggle_sidebar, accelerator="Ctrl+\\")
+view_menu.add_command(label="Toggle Line Numbers", command=toggle_line_numbers, accelerator="Ctrl+Shift+N")
 
 help_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Help", menu=help_menu)
@@ -838,14 +1437,39 @@ root.bind("<Control-t>", ndrysho_ngjyren_tekstit)
 root.bind("<Control-b>", ndrysho_ngjyren_fonit)
 root.bind("<Control-f>", find_text)
 root.bind("<Control-h>", show_find_replace)
-root.bind("<Control-q>", lambda e: root.quit())
+root.bind("<Control-l>", go_to_line)
+root.bind("<Control-Shift-F>", find_in_project)
+root.bind("<Control-Shift-f>", find_in_project)
+root.bind("<Control-Shift-L>", disconnect_liveshare)
+root.bind("<Control-Shift-l>", disconnect_liveshare)
+root.bind("<Control-Shift-W>", lambda e: (wrap_var.set(not wrap_var.get()), toggle_word_wrap()))
+root.bind("<Control-Shift-w>", lambda e: (wrap_var.set(not wrap_var.get()), toggle_word_wrap()))
+root.bind("<Control-q>", on_app_exit)
 root.bind("<Control-plus>", zoom_in)
 root.bind("<Control-minus>", zoom_out)
+root.bind("<Control-backslash>", toggle_sidebar)
+root.bind("<Control-Shift-N>", toggle_line_numbers)
+root.bind("<Control-Shift-n>", toggle_line_numbers)
 root.bind("<Control-z>", undo)
 root.bind("<Control-y>", redo)
 notebook.bind("<<NotebookTabChanged>>", update_status_bar)
+root.protocol("WM_DELETE_WINDOW", on_app_exit)
 
-create_new_tab()
+if restore_session_tabs() == 0:
+    create_new_tab()
+if project_root and os.path.isdir(project_root):
+    set_project_root(project_root)
+rebuild_recent_files_menu()
 autosave()
 update_status_bar()
+update_status_timer()
+
+# Start in a balanced clean layout.
+root.update_idletasks()
+try:
+    total_width = max(root.winfo_width(), 980)
+    main_pane.sash_place(0, int(total_width * 0.24), 0)
+except tk.TclError:
+    pass
+
 root.mainloop()
