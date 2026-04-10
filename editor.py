@@ -5,6 +5,9 @@ import threading
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
+MAX_RECENT_FILES = 10
+SETTINGS_FILE = "settings.json"
+
 
 def resolve_ui_bg(color):
     return "#1e1e1e" if color in ("black", "#000000") else color
@@ -32,7 +35,8 @@ def update_status_bar(event=None):
     path = editor_tab.file_path or "Untitled"
     room = editor_tab.liveshare_room if editor_tab.liveshare_active else "-"
     modified = "modified" if editor_tab.modified else "saved"
-    status_var.set(f"{path} | Ln {line}, Col {int(col) + 1} | {modified} | room: {room}")
+    wrap = "wrap" if word_wrap_enabled else "nowrap"
+    status_var.set(f"{path} | Ln {line}, Col {int(col) + 1} | {modified} | {wrap} | room: {room}")
 
 
 def refresh_tab_title(editor_tab):
@@ -50,10 +54,55 @@ def apply_text_area_theme(editor_tab):
         fg=text_color,
         insertbackground=text_color,
         font=("Courier New", current_font_size),
+        wrap=tk.WORD if word_wrap_enabled else tk.NONE,
     )
     editor_tab.line_numbers_canvas.config(bg=bg_color)
     editor_tab.scrollbar.config(troughcolor=bg_color)
     editor_tab.update_line_numbers()
+
+
+def add_recent_file(file_path):
+    global recent_files
+    if not file_path:
+        return
+    abs_path = os.path.abspath(file_path)
+    recent_files = [p for p in recent_files if p != abs_path]
+    recent_files.insert(0, abs_path)
+    recent_files = recent_files[:MAX_RECENT_FILES]
+    rebuild_recent_files_menu()
+
+
+def rebuild_recent_files_menu():
+    if open_recent_menu is None:
+        return
+    open_recent_menu.delete(0, tk.END)
+    if not recent_files:
+        open_recent_menu.add_command(label="(empty)", state=tk.DISABLED)
+        return
+    for path in recent_files:
+        open_recent_menu.add_command(label=path, command=lambda p=path: open_recent_file(p))
+
+
+def open_recent_file(path):
+    global recent_files
+    if not os.path.exists(path):
+        messagebox.showwarning("Open Recent", f"File not found:\n{path}")
+        if path in recent_files:
+            recent_files.remove(path)
+            rebuild_recent_files_menu()
+            save_settings()
+        return
+    open_file_in_new_tab(path)
+
+
+def set_project_root(selected_dir):
+    global project_root
+    project_root = selected_dir
+    project_label_var.set(f"Project: {project_root}")
+    for item in file_tree.get_children():
+        file_tree.delete(item)
+    root_item = file_tree.insert("", "end", text=os.path.basename(project_root) or project_root, open=True, values=(project_root,))
+    populate_tree_node(root_item, project_root)
 
 
 def populate_tree_node(parent_item, abs_dir):
@@ -100,6 +149,7 @@ def open_file_in_new_tab(file_path):
     editor_tab.file_path = file_path
     editor_tab.modified = False
     editor_tab.update_line_numbers()
+    add_recent_file(file_path)
     refresh_tab_title(editor_tab)
     return editor_tab
 
@@ -117,17 +167,11 @@ def on_tree_double_click(event=None):
 
 
 def open_project_folder(event=None):
-    global project_root
     selected_dir = filedialog.askdirectory()
     if not selected_dir:
         return
-
-    project_root = selected_dir
-    project_label_var.set(f"Project: {project_root}")
-    for item in file_tree.get_children():
-        file_tree.delete(item)
-    root_item = file_tree.insert("", "end", text=os.path.basename(project_root) or project_root, open=True, values=(project_root,))
-    populate_tree_node(root_item, project_root)
+    set_project_root(selected_dir)
+    save_settings()
 
 
 def start_liveshare_with_custom_server(editor_tab):
@@ -291,15 +335,18 @@ def autosave():
 
 def load_colors():
     try:
-        with open("settings.json", "r") as file:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as file:
             settings = json.load(file)
         return (
             settings.get("text_color", "green"),
             settings.get("bg_color", "black"),
             settings.get("font_size", 12),
+            settings.get("project_root"),
+            settings.get("recent_files", []),
+            settings.get("word_wrap", True),
         )
     except (FileNotFoundError, json.JSONDecodeError):
-        return "green", "black", 12
+        return "green", "black", 12, None, [], True
 
 
 def apply_ui_theme():
@@ -324,14 +371,50 @@ def apply_ui_theme():
     style.map("TNotebook.Tab", background=[("selected", "#2a2a2a"), ("active", "#1f1f1f")], foreground=[("selected", text_color), ("active", text_color)])
 
 
-def save_colors(text_color_value, bg_color_value, font_size_value):
+def save_settings():
     settings = {
-        "text_color": text_color_value,
-        "bg_color": bg_color_value,
-        "font_size": font_size_value,
+        "text_color": text_color,
+        "bg_color": bg_color,
+        "font_size": current_font_size,
+        "project_root": project_root,
+        "recent_files": recent_files,
+        "word_wrap": word_wrap_enabled,
     }
-    with open("settings.json", "w") as file:
+    with open(SETTINGS_FILE, "w", encoding="utf-8") as file:
         json.dump(settings, file)
+
+
+def save_colors(text_color_value, bg_color_value, font_size_value):
+    global text_color, bg_color, current_font_size
+    text_color = text_color_value
+    bg_color = bg_color_value
+    current_font_size = font_size_value
+    save_settings()
+
+
+def save_current_tab(editor_tab, force_choose_path=False):
+    if not editor_tab:
+        return False
+    try:
+        if force_choose_path or not editor_tab.file_path:
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".txt",
+                filetypes=[("All Files", "*.*"), ("Text files", "*.txt")],
+            )
+            if not file_path:
+                return False
+            editor_tab.file_path = file_path
+
+        with open(editor_tab.file_path, "w", encoding="utf-8") as file:
+            file.write(editor_tab.text_area.get("1.0", "end-1c"))
+
+        editor_tab.modified = False
+        add_recent_file(editor_tab.file_path)
+        refresh_tab_title(editor_tab)
+        return True
+    except Exception as e:
+        messagebox.showerror("Error", f"Gabim gjate ruajtjes se skedarit: {e}")
+        return False
 
 
 class EditorTab:
@@ -417,7 +500,7 @@ class EditorTab:
 root = tk.Tk()
 root.title("Nullsec8 Editor")
 
-text_color, bg_color, current_font_size = load_colors()
+text_color, bg_color, current_font_size, settings_project_root, settings_recent_files, settings_word_wrap = load_colors()
 option_bg = resolve_ui_bg(bg_color)
 root.config(bg=bg_color)
 root.option_add("*Background", option_bg)
@@ -436,11 +519,15 @@ root.option_add("*Button.Background", "#2a2a2a")
 root.option_add("*Button.Foreground", text_color)
 root.option_add("*Toplevel.Background", option_bg)
 
-project_root = None
+project_root = settings_project_root
+recent_files = settings_recent_files[:MAX_RECENT_FILES] if isinstance(settings_recent_files, list) else []
+word_wrap_enabled = bool(settings_word_wrap)
 status_var = tk.StringVar(value="Ready")
 project_label_var = tk.StringVar(value="Project: (none)")
 tabs = {}
 next_tab_id = 1
+open_recent_menu = None
+wrap_var = tk.BooleanVar(value=word_wrap_enabled)
 
 main_pane = tk.PanedWindow(root, orient=tk.HORIZONTAL, bg=option_bg, sashwidth=5)
 main_pane.pack(fill=tk.BOTH, expand=True)
@@ -716,6 +803,48 @@ def show_find_replace(event=None):
     tk.Button(button_row, text="Replace All", command=do_replace_all, bg="#2a2a2a", fg=text_color).pack(side=tk.LEFT, padx=4)
 
 
+def go_to_line(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        return
+    line_raw = simple_text_prompt("Go to Line", "Line number:")
+    if not line_raw:
+        return
+    try:
+        line_num = int(line_raw)
+        if line_num <= 0:
+            raise ValueError
+    except ValueError:
+        messagebox.showerror("Go to Line", "Please enter a valid positive number.")
+        return
+
+    last_line = int(editor_tab.text_area.index("end-1c").split(".")[0])
+    line_num = min(line_num, last_line)
+    idx = f"{line_num}.0"
+    editor_tab.text_area.mark_set("insert", idx)
+    editor_tab.text_area.see(idx)
+    editor_tab.text_area.focus_set()
+    update_status_bar()
+
+
+def toggle_word_wrap(event=None):
+    global word_wrap_enabled
+    word_wrap_enabled = wrap_var.get()
+    for tab in tabs.values():
+        apply_text_area_theme(tab)
+    update_status_bar()
+    save_settings()
+
+
+def disconnect_liveshare(event=None):
+    editor_tab = get_current_tab()
+    if not editor_tab:
+        return
+    if editor_tab.liveshare_active:
+        stop_liveshare(editor_tab)
+        messagebox.showinfo("LiveShare", "Disconnected.")
+
+
 def zoom_in(event=None):
     editor_tab = get_current_tab()
     if not editor_tab:
@@ -769,6 +898,31 @@ def close_tab(event=None):
     update_status_bar()
 
 
+def close_tab_by_obj(current_tab):
+    if current_tab is None:
+        return True
+
+    stop_liveshare(current_tab)
+    if current_tab.modified:
+        result = messagebox.askyesnocancel("Save Changes", "Do you want to save changes before closing?")
+        if result is None:
+            return False
+        if result and not save_current_tab(current_tab, force_choose_path=False):
+            return False
+
+    try:
+        notebook.forget(current_tab.frame)
+    except tk.TclError:
+        pass
+
+    for tab_id, editor_tab in list(tabs.items()):
+        if editor_tab is current_tab:
+            del tabs[tab_id]
+            break
+    update_status_bar()
+    return True
+
+
 def undo(event=None):
     editor_tab = get_current_tab()
     if editor_tab:
@@ -789,6 +943,35 @@ def redo(event=None):
     update_status_bar()
 
 
+def check_unsaved_tabs():
+    unsaved = [tab for tab in tabs.values() if tab.modified]
+    if not unsaved:
+        return True
+
+    answer = messagebox.askyesnocancel(
+        "Unsaved Changes",
+        "You have unsaved tabs. Save all before exit?",
+    )
+    if answer is None:
+        return False
+    if answer:
+        for tab in list(unsaved):
+            if not save_current_tab(tab, force_choose_path=False):
+                return False
+    return True
+
+
+def on_app_exit(event=None):
+    if not check_unsaved_tabs():
+        return "break"
+
+    for tab in list(tabs.values()):
+        stop_liveshare(tab)
+    save_settings()
+    root.destroy()
+    return "break"
+
+
 menu = tk.Menu(root, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 root.config(menu=menu)
 
@@ -797,14 +980,17 @@ menu.add_cascade(label="File", menu=file_menu)
 file_menu.add_command(label="New", command=new_file, accelerator="Ctrl+N")
 file_menu.add_command(label="Open", command=hap_skedar, accelerator="Ctrl+O")
 file_menu.add_command(label="Open Folder", command=open_project_folder, accelerator="Ctrl+Shift+O")
+open_recent_menu = tk.Menu(file_menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
+file_menu.add_cascade(label="Open Recent", menu=open_recent_menu)
 file_menu.add_command(label="Save", command=ruaj_skedar, accelerator="Ctrl+S")
 file_menu.add_command(label="Save As", command=ruaj_si_skedar, accelerator="Ctrl+Shift+S")
 file_menu.add_separator()
 file_menu.add_command(label="Close Tab", command=close_tab, accelerator="Ctrl+W")
 file_menu.add_separator()
-file_menu.add_command(label="Exit", command=root.quit, accelerator="Ctrl+Q")
+file_menu.add_command(label="Exit", command=on_app_exit, accelerator="Ctrl+Q")
 file_menu.add_separator()
 file_menu.add_command(label="Start LiveShare", command=lambda: start_liveshare_with_custom_server(get_current_tab()))
+file_menu.add_command(label="Disconnect LiveShare", command=disconnect_liveshare, accelerator="Ctrl+Shift+L")
 
 edit_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Edit", menu=edit_menu)
@@ -816,11 +1002,13 @@ edit_menu.add_command(label="Redo", command=redo, accelerator="Ctrl+Y")
 edit_menu.add_separator()
 edit_menu.add_command(label="Find", command=find_text, accelerator="Ctrl+F")
 edit_menu.add_command(label="Find / Replace", command=show_find_replace, accelerator="Ctrl+H")
+edit_menu.add_command(label="Go to Line", command=go_to_line, accelerator="Ctrl+L")
 
 view_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="View", menu=view_menu)
 view_menu.add_command(label="Zoom In", command=zoom_in, accelerator="Ctrl++")
 view_menu.add_command(label="Zoom Out", command=zoom_out, accelerator="Ctrl+-")
+view_menu.add_checkbutton(label="Word Wrap", variable=wrap_var, command=toggle_word_wrap, accelerator="Ctrl+Shift+W")
 
 help_menu = tk.Menu(menu, tearoff=0, bg=option_bg, fg=text_color, activebackground="#2a2a2a", activeforeground=text_color)
 menu.add_cascade(label="Help", menu=help_menu)
@@ -838,14 +1026,23 @@ root.bind("<Control-t>", ndrysho_ngjyren_tekstit)
 root.bind("<Control-b>", ndrysho_ngjyren_fonit)
 root.bind("<Control-f>", find_text)
 root.bind("<Control-h>", show_find_replace)
-root.bind("<Control-q>", lambda e: root.quit())
+root.bind("<Control-l>", go_to_line)
+root.bind("<Control-Shift-L>", disconnect_liveshare)
+root.bind("<Control-Shift-l>", disconnect_liveshare)
+root.bind("<Control-Shift-W>", lambda e: (wrap_var.set(not wrap_var.get()), toggle_word_wrap()))
+root.bind("<Control-Shift-w>", lambda e: (wrap_var.set(not wrap_var.get()), toggle_word_wrap()))
+root.bind("<Control-q>", on_app_exit)
 root.bind("<Control-plus>", zoom_in)
 root.bind("<Control-minus>", zoom_out)
 root.bind("<Control-z>", undo)
 root.bind("<Control-y>", redo)
 notebook.bind("<<NotebookTabChanged>>", update_status_bar)
+root.protocol("WM_DELETE_WINDOW", on_app_exit)
 
 create_new_tab()
+if project_root and os.path.isdir(project_root):
+    set_project_root(project_root)
+rebuild_recent_files_menu()
 autosave()
 update_status_bar()
 root.mainloop()
