@@ -102,6 +102,12 @@ UI_BORDER_COLOR = "#2a3242"
 UI_MUTED_TEXT = "#9aa4b2"
 DEFAULT_SHOW_SIDEBAR = False
 DEFAULT_SHOW_LINE_NUMBERS = False
+PERF_LINE_NUMBER_REDRAW_DELAY_MS = 24
+PERF_STATUS_REDRAW_DELAY_MS = 80
+PERF_SYNTAX_DELAY_MS = 180
+PERF_SYNTAX_DELAY_MS_LIGHTWEIGHT = 360
+PERF_LARGE_FILE_CHAR_LIMIT = 250_000
+PERF_LARGE_FILE_LINE_LIMIT = 6_000
 
 LANGUAGE_EXTENSIONS = {
     ".py": "python",
@@ -201,6 +207,16 @@ def update_status_bar(event=None):
     if editor_tab.liveshare_active and editor_tab.liveshare_room:
         parts.append(f"live:{editor_tab.liveshare_room}")
     status_var.set("  ".join(parts))
+
+
+def schedule_status_update(event=None):
+    global status_update_job
+    if status_update_job:
+        try:
+            root.after_cancel(status_update_job)
+        except tk.TclError:
+            pass
+    status_update_job = root.after(STATUS_UPDATE_DEBOUNCE_MS, update_status_bar)
 
 
 def refresh_tab_title(editor_tab):
@@ -334,6 +350,9 @@ def open_file_in_new_tab(file_path):
     editor_tab.text_area.insert("1.0", content)
     editor_tab.file_path = file_path
     editor_tab.modified = False
+    editor_tab.large_file_mode = len(content) > LARGE_FILE_CHAR_THRESHOLD
+    if editor_tab.large_file_mode:
+        status_var.set("Large file mode enabled: lighter highlighting for performance.")
     editor_tab.update_line_numbers()
     add_recent_file(file_path)
     refresh_tab_title(editor_tab)
